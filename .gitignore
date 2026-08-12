@@ -22,12 +22,15 @@ __pycache__/
 /export/*.onnx
 /export/*.onnx.data
 /export/*.bin
+/export/intermediates/
 
 # Inference harness's copies of generated/vendor binaries — not source
 /inference/public/models/*.onnx
 /inference/public/models/*.onnx.data
 /inference/public/*.bin
 /inference/public/ort/
+/inference/public/weights/
+/inference/public/intermediates/
 
 # OS
 Thumbs.db

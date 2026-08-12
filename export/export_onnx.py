@@ -21,8 +21,8 @@ from model import SpatialUNet  # noqa: E402
 PATCH_SIZE = 128
 
 
-def export(out_path: str, weights_path: str | None = None):
-    model = SpatialUNet()
+def export(out_path: str, weights_path: str | None = None, in_channels: int = 4):
+    model = SpatialUNet(in_channels=in_channels)
     if weights_path:
         model.load_state_dict(torch.load(weights_path, map_location="cpu"))
         print(f"loaded weights from {weights_path}")
@@ -30,7 +30,7 @@ def export(out_path: str, weights_path: str | None = None):
         print("exporting untrained (randomly-initialised) model")
     model.eval()
 
-    dummy_input = torch.randn(1, 4, PATCH_SIZE, PATCH_SIZE)
+    dummy_input = torch.randn(1, in_channels, PATCH_SIZE, PATCH_SIZE)
 
     torch.onnx.export(
         model,
@@ -72,5 +72,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default=str(Path(__file__).parent / "spatial_unet.onnx"))
     parser.add_argument("--weights", default=None)
+    parser.add_argument("--in-channels", type=int, default=4)
     args = parser.parse_args()
-    export(args.out, args.weights)
+    export(args.out, args.weights, args.in_channels)
