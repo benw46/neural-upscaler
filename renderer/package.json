@@ -1,0 +1,24 @@
+{
+  "name": "renderer",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@webgpu/types": "^0.1.71",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.0",
+    "webgpu": "^0.4.0"
+  },
+  "dependencies": {
+    "gl-matrix": "^3.4.4"
+  },
+  "allowScripts": {
+    "webgpu@0.4.0": true
+  }
+}
