@@ -199,6 +199,41 @@ substitute and it passed consistently across every run.
   per-layer diff to mean anything; a silent mismatch here would make the
   harness compare the wrong tensors without erroring.
 
+## Live demo viewer (post-gate, on request)
+
+`inference/viewer.html` (+ `src/viewer.ts`) — a small standalone page, built
+after this phase's gate had already passed, at the owner's explicit request
+to *see* the upscaler working rather than only reading numbers. Shows one
+of four held-out demo frames (1500/1650/1800/1949, from the Spec 3 gate's
+held-out block — genuinely frames the model never trained on) in three
+toggled states: the raw 540p input (nearest-upscaled 2x for display, so the
+aliasing is visible rather than hidden), the WGSL network's actual 1080p
+reconstruction, and the captured 1080p ground truth.
+
+Two scope decisions made explicitly rather than assumed, both raised as
+questions before building:
+
+- **Not a live/interactive camera demo.** At 3.3s/frame, a literal
+  per-frame toggle during live camera movement would be a slideshow, not a
+  real-time comparison — this shows fixed frames instead, computed once and
+  cached, so toggling between views after the first computation is instant.
+- **Cold-start temporal input**, not real recurrent history. Every frame
+  shown is fed zeroed warped-previous-output and a fully-invalid
+  disocclusion mask — exactly frame 0's input in every training sequence
+  (`train_temporal.py`), a real, already-validated code path, not an
+  approximation. Building a live WGSL warp step so history actually
+  accumulates across a sequence of demo frames (matching how the model
+  performs in the Phase 3 stability gate) is real additional work, out of
+  scope here.
+
+`export/copy_demo_frames.py` copies the four frames' raw buffers from
+`E:\neural-upscaler\data\seed-20260812` into
+`inference/public/demo_frames/` (gitignored, like every other generated
+asset under `inference/public/` — rerun the script to regenerate). The
+input-construction code in `viewer.ts` reflect-pads 540→544 rows to exactly
+match `training/src/dataset.py`'s `pad_to_multiple(mode="reflect")` — the
+same preprocessing-parity fragile-logic point as the rest of this phase.
+
 ## Known gaps / notes for later work
 
 - **Full-resolution inference is 1671x slower than PSSR's reference**,

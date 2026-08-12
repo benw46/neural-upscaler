@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Neural Upscaler — Viewer</title>
+    <style>
+      html, body {
+        margin: 0;
+        background: #111;
+        color: #ddd;
+        font: 14px/1.4 ui-monospace, monospace;
+      }
+      #app {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        padding: 16px;
+      }
+      #controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 20px;
+        align-items: center;
+        justify-content: center;
+      }
+      .group {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      .group span {
+        color: #888;
+        margin-right: 4px;
+      }
+      button {
+        background: #222;
+        color: #ddd;
+        border: 1px solid #444;
+        border-radius: 4px;
+        padding: 6px 12px;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) {
+        background: #333;
+      }
+      button.active {
+        background: #2a5;
+        border-color: #2a5;
+        color: #041;
+        font-weight: bold;
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      #status {
+        color: #999;
+        min-height: 1.4em;
+      }
+      #canvasWrap {
+        max-width: 100%;
+        border: 1px solid #333;
+      }
+      canvas {
+        display: block;
+        max-width: 100%;
+        height: auto;
+        image-rendering: pixelated;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="controls">
+        <div class="group">
+          <span>frame</span>
+          <div id="frameButtons"></div>
+        </div>
+        <div class="group">
+          <span>view</span>
+          <div id="modeButtons"></div>
+        </div>
+      </div>
+      <div id="status">initialising…</div>
+      <div id="canvasWrap">
+        <canvas id="canvas" width="1920" height="1080"></canvas>
+      </div>
+    </div>
+    <script type="module" src="/src/viewer.ts"></script>
+  </body>
+</html>

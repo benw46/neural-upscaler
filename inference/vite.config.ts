@@ -1,4 +1,7 @@
+import { resolve } from "node:path";
 import { defineConfig } from "vite";
+
+const rootDir = import.meta.dirname;
 
 export default defineConfig({
   // onnxruntime-web's wasm/jsep glue .mjs files aren't valid targets for
@@ -8,5 +11,16 @@ export default defineConfig({
   // files. Standard workaround for onnxruntime-web + Vite.
   optimizeDeps: {
     exclude: ["onnxruntime-web"],
+  },
+  build: {
+    // Two independent pages: index.html (the Spec 4 correctness/profiling
+    // harness) and viewer.html (the 540p-vs-network-1080p demo). Vite only
+    // builds index.html by default; both need listing explicitly here.
+    rollupOptions: {
+      input: {
+        main: resolve(rootDir, "index.html"),
+        viewer: resolve(rootDir, "viewer.html"),
+      },
+    },
   },
 });

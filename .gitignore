@@ -31,6 +31,7 @@ __pycache__/
 /inference/public/ort/
 /inference/public/weights/
 /inference/public/intermediates/
+/inference/public/demo_frames/
 
 # OS
 Thumbs.db
