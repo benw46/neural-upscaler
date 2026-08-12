@@ -16,6 +16,19 @@ function mulberry32(seed: number) {
   };
 }
 
+/** Scales rotation speed and all oscillation frequencies (radius/height/pan)
+ * down from their original tuning. Amplitudes are untouched, so the path
+ * still covers the same range, just more slowly/smoothly.
+ *
+ * Was 0.4, then dropped to 0.15 here — two things compounded: the original
+ * tuning simply moved too fast frame-to-frame, and separately, widening the
+ * orbit radius (~14-18 -> ~39-41, to clear scene geometry) raised the
+ * camera's actual linear/tangential speed proportionally (linear speed =
+ * radius * angularSpeed) even though angularSpeed in rad/s hadn't changed —
+ * so the radius change alone made it feel faster again without any
+ * intentional speed-up. */
+const SPEED_SCALE = 0.15;
+
 /** Deterministic scripted camera path, reproducible byte-for-byte from `seed`.
  * Combines orbital rotation, radial (forward/back) motion, and a panning
  * look-target sweep, so any ~20+ frame window exercises all three motion
@@ -38,18 +51,25 @@ export class ScriptedCameraPath {
 
   constructor(seed: number) {
     const rng = mulberry32(seed);
-    this.baseRadius = 14 + rng() * 4;
-    this.radiusAmp = 5 + rng() * 3;
-    this.radiusFreq = 0.15 + rng() * 0.05;
+    // Orbit radius kept outside the ground plane's edge (extends to 30) and
+    // the vast majority of scene geometry (extends to ~39.5 only at a few
+    // outlier corner buildings) — min radius here is ~31.5, comfortably
+    // past the ground edge. This is a deliberate composition choice, not
+    // just collision safety: relying on collision push-out as the primary
+    // shot-composer produced awkward pressed-against-the-wall framing.
+    // Push-out remains active as a safety net for the rare outlier corners.
+    this.baseRadius = 39 + rng() * 2;
+    this.radiusAmp = 1.5 + rng() * 1;
+    this.radiusFreq = (0.15 + rng() * 0.05) * SPEED_SCALE;
     this.radiusPhase = rng() * Math.PI * 2;
-    this.angularSpeed = 0.25 + rng() * 0.1;
+    this.angularSpeed = (0.25 + rng() * 0.1) * SPEED_SCALE;
     this.anglePhase = rng() * Math.PI * 2;
     this.baseHeight = 3 + rng() * 2;
     this.heightAmp = 1.5 + rng() * 1;
-    this.heightFreq = 0.1 + rng() * 0.05;
+    this.heightFreq = (0.1 + rng() * 0.05) * SPEED_SCALE;
     this.heightPhase = rng() * Math.PI * 2;
     this.panAmp = 4 + rng() * 2;
-    this.panFreq = 0.12 + rng() * 0.04;
+    this.panFreq = (0.12 + rng() * 0.04) * SPEED_SCALE;
     this.panPhase = rng() * Math.PI * 2;
   }
 

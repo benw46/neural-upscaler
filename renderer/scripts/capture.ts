@@ -181,12 +181,12 @@ async function main() {
   // GPU state between runs — frameState/stateViewProj are pure functions of
   // (seed, frameIndex), so recomputing is exact.
   const seedIndex = Math.max(startFrame - 1, 0);
-  const seedState = frameState(cameraPath, seedIndex);
+  const seedState = frameState(cameraPath, seedIndex, renderer.colliders);
   let prevViewProj = new Float32Array(stateViewProj(seedState, args.width, args.height, true));
 
   const t0 = Date.now();
   for (let frameIndex = startFrame; frameIndex < args.frames; frameIndex++) {
-    const state = frameState(cameraPath, frameIndex);
+    const state = frameState(cameraPath, frameIndex, renderer.colliders);
     const viewProj = new Float32Array(stateViewProj(state, args.width, args.height, true));
 
     renderer.renderInto(inputGBuffer, viewProj, prevViewProj, `capture-input-${frameIndex}`);

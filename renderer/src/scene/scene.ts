@@ -1,5 +1,6 @@
 import { makeBox, makeCylinder, makePlane, mergeMeshes, transformMesh, type Mesh } from "./geometry.ts";
 import { checkerTexture, colorCheckerTexture, noiseTexture, stripeTexture } from "./texture.ts";
+import type { Collider } from "./colliders.ts";
 
 /** One draw-call group: merged geometry sharing a single procedural texture. */
 export interface SceneGroup {
@@ -7,6 +8,14 @@ export interface SceneGroup {
   mesh: Mesh;
   textureData: Uint8Array;
   textureSize: number;
+}
+
+export interface Scene {
+  groups: SceneGroup[];
+  /** Camera-avoidance colliders — built from the exact same placement loops
+   * as the render geometry below (not a separately-derived RNG stream), so
+   * they can never drift out of sync with what's actually rendered. */
+  colliders: Collider[];
 }
 
 /** Deterministic seeded PRNG (mulberry32) — scene layout must be reproducible. */
@@ -28,8 +37,9 @@ const SEED = 20260812;
  * All content uses high-frequency procedural textures/geometry deliberately
  * (see texture.ts) so 540p rendering aliases and there's real upscaling
  * work to evaluate. Static scene only, per Spec 1 Part A step 3. */
-export function buildScene(): SceneGroup[] {
+export function buildScene(): Scene {
   const rng = mulberry32(SEED);
+  const colliders: Collider[] = [];
 
   // uvTile values kept moderate (not maximally fine) — see texture.ts header:
   // tiling density this high combined with per-texel-uncorrelated content
@@ -52,6 +62,9 @@ export function buildScene(): SceneGroup[] {
       const h = 1 + rng() * 8;
       const box = makeBox(w, h, d, 1);
       buildingMeshes.push(transformMesh(box, [cx, h / 2, cz], rng() * Math.PI * 2));
+      // Circumscribed circle (half-diagonal) — rotation-independent, so no
+      // need to track the box's rotation angle for collision purposes.
+      colliders.push({ center: [cx, cz], radius: Math.hypot(w / 2, d / 2), minY: 0, maxY: h });
     }
   }
 
@@ -63,8 +76,10 @@ export function buildScene(): SceneGroup[] {
     const rx = Math.cos(angle) * radius;
     const rz = Math.sin(angle) * radius;
     const height = 2 + rng() * 4;
-    const cyl = makeCylinder(0.06 + rng() * 0.05, height, 8);
+    const rodRadius = 0.06 + rng() * 0.05;
+    const cyl = makeCylinder(rodRadius, height, 8);
     rodMeshes.push(transformMesh(cyl, [rx, height / 2, rz]));
+    colliders.push({ center: [rx, rz], radius: rodRadius, minY: 0, maxY: height });
   }
 
   const accentMeshes: Mesh[] = [];
@@ -77,12 +92,15 @@ export function buildScene(): SceneGroup[] {
     const s = 0.4 + rng() * 0.6;
     const box = makeBox(s, s, s, 1);
     accentMeshes.push(transformMesh(box, [ax, s / 2, az], rng() * Math.PI * 2));
+    colliders.push({ center: [ax, az], radius: Math.hypot(s / 2, s / 2), minY: 0, maxY: s });
   }
 
-  return [
+  const groups: SceneGroup[] = [
     { name: "ground", mesh: ground, textureData: noiseTexture(128, SEED), textureSize: 128 },
     { name: "buildings", mesh: mergeMeshes(buildingMeshes), textureData: checkerTexture(64), textureSize: 64 },
     { name: "rods", mesh: mergeMeshes(rodMeshes), textureData: stripeTexture(64), textureSize: 64 },
     { name: "accents", mesh: mergeMeshes(accentMeshes), textureData: colorCheckerTexture(64, [220, 90, 60], [40, 60, 200]), textureSize: 64 },
   ];
+
+  return { groups, colliders };
 }

@@ -107,13 +107,51 @@ what makes 540p rendering alias in the first place. The gate was not
 loosened to accommodate the original textures; the scene was fixed instead
 (CLAUDE.md hard rule 3).
 
+## Camera-path revisions (post-gate polish)
+
+After the initial gate pass, the camera path was revised three times based
+on direct review of the interactive preview:
+
+1. **Slowed down** — the original path moved too much frame-to-frame.
+   Added `SPEED_SCALE` in `camera/path.ts` scaling rotation speed and all
+   oscillation frequencies (radius/height/pan); amplitudes untouched.
+2. **Collision avoidance** — the scripted orbit/oscillation formula has no
+   awareness of scene geometry, and at the original radius (14–18) it
+   regularly clipped into or through buildings. Added `scene/colliders.ts`:
+   every placed object (building, rod, accent cube) gets a conservative
+   bounding-cylinder collider built from the *same placement loop* that
+   generates its render geometry (not a separately-derived RNG stream, so
+   they can't drift out of sync). `camera/sequence.ts`'s `frameState()`
+   pushes the raw analytic eye position outside every collider (0.4 unit
+   margin) and above the ground plane (0.25 unit margin) before it's used —
+   verified programmatically across 2000 frames (zero violations) and
+   against the actual generated dataset's manifest (zero violations across
+   all 500 frames).
+3. **Widened the orbit** — pure collision push-out as the primary
+   shot-composer produced awkward pressed-against-the-wall and
+   squeezed-between-buildings framing. Scene geometry extends to radius
+   ~39.5 at its farthest outlier corners but the ground plane itself only
+   extends to 30; the orbit radius was moved to ~39–43 (just past the
+   typical geometry field, deliberately not fully past every outlier, since
+   going further would put the ground plane's edge in frame as empty void).
+   Push-out now triggers on ~4% of frames, each under 1 unit — a rare
+   safety net rather than the routine determinant of framing. Then
+   `SPEED_SCALE` was reduced again (0.4 → 0.15): widening the radius raised
+   the camera's actual linear/tangential speed proportionally
+   (linear speed = radius × angular speed) even though angular speed
+   in rad/s hadn't changed, so the radius change alone made the path feel
+   faster again without any intentional speed-up. Verified: mean per-frame
+   eye displacement in the final dataset is ~0.066 world units.
+
 ## Gate results
 
 Dataset generated: **500 frames**, seed `20260812`, at
 `E:\neural-upscaler\data\seed-20260812` (≈11.6 GB — colour, depth, motion at
 960×540, ground-truth colour at 1920×1080, all uncompressed; see
 `dataset.json` for the exact per-buffer layout and `manifest.jsonl` for
-per-frame camera/jitter records).
+per-frame camera/jitter records). This is the *final* dataset, generated
+after all three camera-path revisions above — the gate was re-run against
+it, not left pointing at stale numbers from the pre-revision path.
 
 Reprojection validated across **40 consecutive frame pairs** (frames 1–40).
 The scripted camera path combines orbital rotation, radial forward/back
@@ -125,17 +163,20 @@ such rather than presenting it as the only valid interpretation.
 
 | | mean error (included px) | p99 | max | disocclusion frac |
 |---|---|---|---|---|
-| mean across 40 pairs | 0.030 | 0.352 | — | 9.2% |
-| worst single pair | — | — | 0.835 | 76.5% (frame 10 — a building sweeps to fill most of the frame) |
+| mean across 40 pairs | 0.039 | 0.385 | — | 0.72% |
+| worst single pair | — | — | 0.614 | ~1% (no more large sweeping-occlusion events, since the camera moves far more gently now) |
 
 Colour channels are ~[0,1]; error is mean absolute channel difference.
-Heatmaps (`E:\neural-upscaler\data\seed-20260812\validation\heatmap_*.png`)
-show black (near-zero error) interiors on every surface, with visible error
-concentrated at checker/stripe cell edges and geometric silhouettes/
-disocclusions (shown in blue) — consistent with correct motion vectors and
-inherent edge-reprojection error, not a systematic bug. Frame 10's example
-shows the disocclusion mask correctly recognising when a building sweeps to
-occupy most of the screen.
+Compared to the pre-revision gate run (mean 0.030, worst-case max 0.835,
+mean disocclusion 9.2%): disocclusion fraction and worst-case max error both
+dropped substantially (slower, more distant camera rarely sweeps a building
+across the whole frame anymore), while mean error rose slightly. The likely
+cause: the camera now orbits much farther out (~40 vs ~15 world units), so
+the same fixed-size texture cells subtend fewer screen pixels — a bit closer
+to their aliasing limit again, purely a consequence of viewing distance, not
+a regression in the motion-vector math. Heatmaps still show black
+(near-zero error) interiors with error concentrated at checker/stripe cell
+edges, just a somewhat denser edge grid than the closer-orbit version.
 
 **This is the gate the owner should look at personally** (per Spec 1) —
 sampled heatmaps were shown inline during the session; the full set for all
@@ -157,6 +198,13 @@ sampled heatmaps were shown inline during the session; the full set for all
   being pure functions of `(seed, frameIndex)`; don't introduce hidden
   per-run state into those without breaking resume-determinism (verified
   byte-identical between fresh and resumed runs during this session).
+- `scene/colliders.ts` — camera collision avoidance uses a *conservative*
+  bounding cylinder (circumscribed circle) for box colliders rather than a
+  true oriented-box test, so clearance near box corners is a bit more
+  generous than strictly necessary. If the scene grows much denser, this
+  margin of error could start meaningfully constraining valid camera
+  positions — worth revisiting with real OBB tests at that point rather
+  than assuming the conservative approximation stays cheap.
 
 ## Known gaps / notes for later phases
 

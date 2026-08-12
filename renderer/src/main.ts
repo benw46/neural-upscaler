@@ -47,7 +47,7 @@ async function main() {
   }
 
   function frameLoop() {
-    const state = frameState(cameraPath, frameIndex);
+    const state = frameState(cameraPath, frameIndex, renderer.colliders);
     const viewProj = new Float32Array(stateViewProj(state, width, height, true));
     if (!prevViewProj) prevViewProj = viewProj;
 

@@ -1,6 +1,7 @@
 import { GBuffer } from "./gbuffer.ts";
 import { MainPipeline, type GpuGroup } from "./pipeline.ts";
 import { buildScene } from "../scene/scene.ts";
+import type { Collider } from "../scene/colliders.ts";
 
 /** Owns the uploaded scene and pipeline; renders into any GBuffer given
  * explicit view-projection matrices. Deliberately has no notion of "current
@@ -14,11 +15,14 @@ export class SceneRenderer {
   private readonly pipeline: MainPipeline;
   private readonly groups: GpuGroup[];
   private readonly device: GPUDevice;
+  readonly colliders: Collider[];
 
   constructor(device: GPUDevice, mainShaderSource: string) {
     this.device = device;
     this.pipeline = new MainPipeline(device, mainShaderSource);
-    this.groups = this.pipeline.uploadGroups(buildScene());
+    const scene = buildScene();
+    this.groups = this.pipeline.uploadGroups(scene.groups);
+    this.colliders = scene.colliders;
   }
 
   /** Renders one frame into `gbuffer` using the given (already
