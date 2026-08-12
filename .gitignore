@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.log
+
+# Datasets live on E:\ per CLAUDE.md; repo only holds pointer/config
+/data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+Thumbs.db
+.DS_Store
