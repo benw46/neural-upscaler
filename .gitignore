@@ -12,7 +12,10 @@ __pycache__/
 
 # Training artifacts — regenerable, large binary outputs
 /training/checkpoints/
+/training/checkpoints_temporal/
 /training/runs/
+/training/runs_temporal/
+/training/long_sequence_results/
 /training/*.txt
 
 # ONNX exports and diff fixtures — regenerable from training/src via export/
