@@ -652,3 +652,133 @@ genuinely better than the original baseline, but for a different reason
 than assumed — worth knowing before reaching for `lpips_weight` again next
 time a colour issue comes up, since the data here says that's not the
 lever that moved it.
+
+## Colour desaturation, round 2 — does training on real colour fix it?
+
+Round 1 above only ever evaluated grayscale-trained checkpoints against
+grayscale-scene ground truth. Once the coloured scene variant and
+`colour_tw0.75` (a temporal model trained from scratch on the coloured
+dataset, `temporal_weight=0.75, lpips_weight=0.2`, otherwise the same
+recipe as the deployed model) existed, `measure_color_sweep_temporal.py`
+was re-pointed at the coloured dataset's held-out window (frames
+1500–1849 of `seed-20260812-colored`) and re-run against all four
+checkpoints — the three original grayscale-trained models plus
+`colour_tw0.75` — so the comparison isolates one variable: does the
+*training data's* colour content affect desaturation, independent of
+`temporal_weight`/`lpips_weight`? This directly follows up the earlier
+finding that neither knob explained chroma.
+
+**Chroma (saturation) — training on real colour is the fix.** All three
+grayscale-trained models land within a few percent of each other in every
+bin (confirming this isn't noise), and `colour_tw0.75` roughly halves the
+gap across the board:
+
+| gt chroma bin | grayscale-trained (avg of 3) | **colour-trained** | improvement |
+|---|---:|---:|---:|
+| 0.0–0.2 | −0.0397 | **−0.0050** | ~87% less |
+| 0.2–0.4 | −0.2266 | **−0.0962** | ~58% less |
+| 0.4–0.6 | −0.4154 | **−0.2096** | ~50% less |
+| 0.6–0.8 | −0.6454 | **−0.4211** | ~35% less |
+
+(n up to ~692M pixels in the largest bin, ~25K in the smallest — all four
+populated bins are well-sampled.) The grayscale-trained models never saw
+real chroma variation during training, so of course they wash real colour
+content out more; training on data that actually has colour in it directly
+addresses that. It doesn't fully close the gap — `colour_tw0.75` still
+desaturates relative to ground truth in every bin — but the reduction is
+large, consistent, and exactly the variable this run isolated.
+
+**Luma (brightness) — no improvement, and no reason to expect one.** Same
+four checkpoints, binned by ground-truth luma instead:
+
+| gt luma bin | grayscale-trained (avg of 3) | colour-trained |
+|---|---:|---:|
+| 0.0–0.2 | +0.0066 | −0.0048 |
+| 0.2–0.4 | −0.0110 | −0.0249 |
+| 0.4–0.6 | −0.0637 | −0.0713 |
+| 0.6–0.8 | −0.4987 (n=23) | −0.5192 (n=23) |
+
+`colour_tw0.75` is flat-to-slightly-worse everywhere except the near-black
+bin. The 0.6–0.8 bin's large-looking numbers are not meaningful — only 23
+pixels total land there across the whole 349-frame rollout, versus
+hundreds of millions in the populated chroma bins. This confirms
+highlight-darkening and chroma desaturation are two independent problems:
+round 1 already traced brightness to `temporal_weight`, and this run
+confirms colour training doesn't touch it either way.
+
+**Practical upshot**: two separate colour issues, two separate fixes.
+Training on real colour data is a real, measured lever for saturation —
+already exercised by shipping `colour_tw0.75`/Colour 1080p — but it's not
+a highlight-darkening fix, and highlight-darkening was already addressed
+separately via `temporal_weight=0.75`. Remaining chroma gap in
+`colour_tw0.75` (still −0.10 to −0.42 across bins) is the natural next
+target if further saturation improvement is wanted, e.g. a saturation-
+aware loss term — not yet attempted.
+
+## Saturation-specific loss term — closing the remaining chroma gap
+
+Round 2 above left a real, if smaller, chroma gap even in the colour-
+trained model. Added an explicit chroma loss to `CombinedLoss`
+(`losses.py`): `sat_weight * L1(chroma(pred), chroma(gt))`, where
+`chroma(img) = max(R,G,B) − min(R,G,B)` per pixel — deliberately the same
+definition the desaturation diagnostic itself measures, so the loss term
+directly targets the quantity being evaluated. Opt-in via `--sat-weight`
+on `train_temporal.py` (and `CombinedLoss(sat_weight=...)` directly),
+default `0.0` = off, unchanged behaviour. `amax`/`amin` are
+subdifferentiable (gradient flows to whichever channel is currently
+max/min), so no smooth approximation was needed.
+
+Trained two candidates from the `colour_tw0.75` recipe (same
+`temporal_weight=0.75, lpips_weight=0.2`, colour dataset) with
+`sat_weight=0.5` and `sat_weight=1.0`, then ran both through the same
+round-2 diagnostic plus the full 350-frame long-sequence gate
+(`test_long_sequence.py`, extended with a `--run-dir` override so it could
+target the colour dataset — it previously only pointed at the deleted
+grayscale `RUN_DIR`). Neither `colour_tw0.75` nor `colour_tw0.75_sat0.5`
+had actually been run through this gate before (only the spatial/luma
+diagnostic), so both were gated here for a fair baseline.
+
+**`sat_weight=0.5` reduced the remaining chroma gap further, and improved
+everything else as a side effect:**
+
+| chroma bin | colour_tw0.75 | +sat0.5 | reduction |
+|---|---:|---:|---:|
+| 0.0–0.2 | −0.0050 | **+0.0015** | gap closed (tiny overshoot) |
+| 0.2–0.4 | −0.0962 | **−0.0664** | 31% smaller |
+| 0.4–0.6 | −0.2096 | **−0.1696** | 19% smaller |
+| 0.6–0.8 | −0.4211 | **−0.3689** | 12% smaller |
+
+Luma gap shrank too in every bin (e.g. 0.2–0.4: −0.0249→−0.0172), overall
+L1 vs GT improved in the gate (0.0216→0.0196), and brightness drift was
+marginally better (+0.00099 excess drift → +0.00065). No sign of the sat
+term trading off against anything at this weight — chroma accuracy and
+general reconstruction accuracy weren't in tension here. Gate passed
+clean: no brightness drift, no ghosting spike, no degenerate
+copy-history collapse (`l1(pred,warped_prev)` far from zero,
+`l1(pred,gt)` far from `l1(warped_prev,gt)`).
+
+**`sat_weight=1.0` showed clear diminishing returns, and the first
+negative signal in the whole experiment:**
+
+| chroma bin | +sat0.5 | +sat1.0 | further reduction |
+|---|---:|---:|---:|
+| 0.2–0.4 | −0.0664 | −0.0601 | ~9.5% more |
+| 0.4–0.6 | −0.1696 | −0.1546 | ~8.8% more |
+| 0.6–0.8 | −0.3689 | −0.3585 | ~2.8% more |
+
+Doubling the weight bought a much smaller further gain than the 0→0.5
+step did. Worse, luma got slightly worse at sat1.0 (e.g. 0.2–0.4:
+−0.0172→−0.0205), and training's own `val_l1` was worse too
+(sat0.5: 0.02342 vs sat1.0: 0.02457) — the gate still passed clean at
+sat1.0 (no correctness issue), but the quality tradeoff had started to
+show. **`sat_weight=0.5` is the better operating point**: it captured
+most of the available improvement without the cost that appears at 1.0.
+
+**Deployed**: `colour_tw0.75_sat0.5` replaces `colour_tw0.75` as the
+"Colour 1080p" model in the viewer (`inference/public/weights/colour/`,
+re-exported via `extract_weights.py --checkpoint
+colour_tw0.75_sat0.5_best.pt --out-dir ../inference/public/weights/colour`
+— same architecture/manifest, weights only). Verified end-to-end in the
+browser: WGSL inference loads and runs without error against the new
+weights (401.5ms/frame on the static fixture check), and the live
+coloured-scene pipeline renders visibly saturated colours at ~6.6fps.
