@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Neural Upscaler — Docs</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #111;
+        --panel: #181818;
+        --border: #2a2a2a;
+        --text: #ddd;
+        --muted: #888;
+        --accent: #6ab0ff;
+        --code-bg: #1c1c1c;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace;
+      }
+      #layout {
+        display: flex;
+        min-height: 100vh;
+      }
+      nav {
+        width: 240px;
+        flex-shrink: 0;
+        background: var(--panel);
+        border-right: 1px solid var(--border);
+        padding: 20px 0;
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        overflow-y: auto;
+      }
+      nav h1 {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        padding: 0 20px 12px;
+        margin: 0;
+      }
+      nav a {
+        display: block;
+        padding: 8px 20px;
+        color: var(--text);
+        text-decoration: none;
+        border-left: 3px solid transparent;
+        font-size: 13.5px;
+      }
+      nav a:hover { background: #1f1f1f; }
+      nav a.active {
+        color: var(--accent);
+        border-left-color: var(--accent);
+        background: #1a2430;
+      }
+      .nav-divider {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        padding: 18px 20px 6px;
+        border-top: 1px solid var(--border);
+        margin-top: 8px;
+      }
+      main {
+        flex: 1;
+        min-width: 0;
+        padding: 40px 48px 80px;
+        max-width: 900px;
+      }
+      #content h1 { font-size: 26px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+      #content h2 { font-size: 20px; margin-top: 36px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+      #content h3 { font-size: 16.5px; margin-top: 28px; color: #eee; }
+      #content p { color: #cfcfcf; }
+      #content a { color: var(--accent); }
+      #content code {
+        background: var(--code-bg);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 1px 5px;
+        font-size: 0.92em;
+      }
+      #content pre {
+        background: var(--code-bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 14px 16px;
+        overflow-x: auto;
+      }
+      #content pre code { background: none; border: none; padding: 0; }
+      #content table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 16px 0;
+        font-size: 13.5px;
+        display: block;
+        overflow-x: auto;
+      }
+      #content th, #content td {
+        border: 1px solid var(--border);
+        padding: 6px 10px;
+        text-align: left;
+      }
+      #content th { background: var(--panel); color: var(--muted); }
+      #content blockquote {
+        margin: 16px 0;
+        padding: 4px 16px;
+        border-left: 3px solid var(--accent);
+        color: var(--muted);
+      }
+      #content hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+      #content ul, #content ol { color: #cfcfcf; padding-left: 24px; }
+      #content li { margin: 4px 0; }
+      #content strong { color: #fff; }
+      #status { color: var(--muted); padding: 40px; }
+      .artifact-list { list-style: none; padding: 0; margin: 20px 0; }
+      .artifact-list li {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 14px 18px;
+        margin-bottom: 10px;
+        background: var(--panel);
+      }
+      .artifact-list a {
+        font-size: 15px;
+        font-weight: bold;
+        color: #fff;
+        text-decoration: none;
+      }
+      .artifact-list a:hover { color: var(--accent); }
+      .artifact-list .meta { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+    </style>
+  </head>
+  <body>
+    <div id="layout">
+      <nav>
+        <h1>docs</h1>
+        <div id="navLinks"></div>
+      </nav>
+      <main>
+        <div id="content"><div id="status">loading…</div></div>
+      </main>
+    </div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
