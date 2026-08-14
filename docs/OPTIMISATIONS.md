@@ -602,10 +602,53 @@ by default) — a validated negative result, not a mistake to undo.
 
 ## Colour desaturation check on the deployed (temporal) model
 
-*In progress — `measure_color_sweep.py` was written to diagnose an
-L1-driven colour desaturation/highlight-darkening issue, but only ever
-ran against the Phase 2 spatial checkpoints, never the temporal model the
-higher `lpips_weight=0.2` was actually meant to fix. A temporal-model
-counterpart (`measure_color_sweep_temporal.py`, real recurrent rollout
-over the held-out calm window, same chroma/luma-binned-gap methodology)
-is being run now; this section will be updated with the result.*
+`measure_color_sweep.py` was written to diagnose an L1-driven colour
+desaturation/highlight-darkening issue, but only ever ran against the
+Phase 2 spatial checkpoints, never the temporal model the higher
+`lpips_weight=0.2` was actually meant to fix. Built a temporal-model
+counterpart (`measure_color_sweep_temporal.py`): a real recurrent rollout
+over the full 349-frame held-out calm window (not 10 single cold-start
+frames like the spatial version), binning chroma/luma error against
+ground truth by the same methodology.
+
+**One implementation note worth remembering**: the first version of this
+script accumulated every frame's full-resolution pixel array for all 3
+checkpoints before computing anything, which peaked at ~11.4GB for a
+single checkpoint and was heading toward ~35GB across all three — on a
+32GB machine. Killed mid-run before it caused real trouble. Fixed by
+computing running per-bin sum/count as each frame is processed and
+discarding the pixel data immediately, instead of keeping it all until the
+end — mathematically identical result, peak memory now under ~1GB
+regardless of frame count.
+
+**The result directly contradicts the original hypothesis.** Compared
+three checkpoints — `colorbaseline` (a freshly-retrained equivalent of the
+original `temporal_weight=1.0, lpips_weight=0.1` recipe; the real one was
+lost to an unrelated accidental overwrite this session), the existing
+`lpips_weight=0.2` model at the same `temporal_weight=1.0`, and the
+deployed `temporal_weight=0.75, lpips_weight=0.2` model — on the held-out
+calm window (349 frames, up to 723M pixels per bin):
+
+| gt luma bin | baseline (tw=1.0, lpips=0.1) | tw=1.0, lpips=0.2 | **deployed (tw=0.75, lpips=0.2)** |
+|---|---:|---:|---:|
+| 0.8–1.0 (brightest highlights) | −0.2671 | −0.3146 (**18% worse**) | **−0.2062 (23% better)** |
+| 0.6–0.8 | −0.0222 | −0.0300 (worse) | −0.0226 (~flat) |
+| 0.4–0.6 | −0.0071 | −0.0116 (worse) | −0.0074 (~flat) |
+| 0.2–0.4 | −0.0562 | −0.0494 (better) | −0.0414 (better still) |
+
+**Raising `lpips_weight` alone (0.1→0.2, `temporal_weight` held at 1.0)
+made highlight-darkening worse, not better**, in the bin that matters most
+(brightest highlights, the one with the clearest visible artifact). The
+deployed model's real improvement over baseline in that same bin (23%
+better) lines up with the `temporal_weight` change (1.0→0.75), not the
+`lpips_weight` change — the opposite of the premise that motivated raising
+`lpips_weight` in the first place. Chroma (saturation) showed no clear
+story either way — small, inconsistent differences across all three
+configs, no evidence of a real desaturation fix or regression from either
+knob.
+
+**Practical upshot**: the deployed model's highlight-darkening is
+genuinely better than the original baseline, but for a different reason
+than assumed — worth knowing before reaching for `lpips_weight` again next
+time a colour issue comes up, since the data here says that's not the
+lever that moved it.

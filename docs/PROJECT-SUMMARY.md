@@ -147,3 +147,35 @@ Per Spec 4's own closing instruction: no further feature work (higher
 resolution, dynamic scenes, larger models, the shared-memory-tiling
 optimisation identified in Phase 4) was started without being asked. The
 project as specced is complete at this document.
+
+## Follow-on work after this document (2026-08-14)
+
+The owner asked for further optimisation work after the project as specced
+was already complete — the numbers above (3342ms/frame, `temporal_weight=1.0`)
+are the historical record of what Spec 4's gate actually passed with, kept
+intact rather than edited in place. What's actually deployed now is
+different; full detail is in `docs/OPTIMISATIONS.md`, which grew a
+"Training Pipeline Optimisations" section alongside its original WGSL one.
+Headline changes:
+
+- **WGSL inference**: 3342ms/frame → **96.0ms/frame**, a **32x+ cumulative
+  speedup**, via four rounds of kernel work plus a GPU buffer-leak fix that
+  was quietly inflating every profiling number until found and fixed.
+- **Training speed**: mixed-precision (bf16) training and a fix to the
+  temporal dataloader's ~6x redundant reads combined for a **~6x** faster
+  full training run (73min → 12min for 20 epochs).
+- **The deployed model changed**: a finer temporal-weight sweep — made
+  affordable by the training-speed work above — found `temporal_weight=0.75`
+  beats the original `1.0` on both the real long-sequence gate and a new
+  disocclusion stress test. **`sweep_tw0.75_best.pt` is the deployed
+  checkpoint now**, not the model this document's numbers describe.
+- **Two things were tested and honestly rejected**, not silently dropped:
+  computing LPIPS at reduced resolution (real speedup, real quality cost,
+  not adopted) and a couple of training-log anomalies that turned out to
+  be benign, self-correcting instability rather than bugs worth fixing.
+- **Now hosted on GitHub**: `https://github.com/benw46/neural-upscaler`.
+
+This section exists so this document stays a trustworthy entry point
+rather than a frozen snapshot that quietly stops matching reality —
+`docs/OPTIMISATIONS.md` and `docs/PHASE-3-SUMMARY.md`'s own follow-on
+section have the full detail and numbers.

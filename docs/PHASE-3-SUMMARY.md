@@ -146,6 +146,48 @@ divergence once.
   with a multi-channel diff needs the mask broadcast to match before
   summing, not after).
 
+## Post-gate follow-on work (2026-08-14)
+
+Everything above is the historical record of how Phase 3's gate was
+originally passed — kept intact, not rewritten. Since then, follow-on work
+(prompted by the owner, same pattern as Phase 4's `docs/OPTIMISATIONS.md`)
+changed which checkpoint is actually deployed and closed two of the "Known
+gaps" below. Full detail lives in `docs/OPTIMISATIONS.md`'s "Training
+Pipeline Optimisations" section; summary here so this document doesn't go
+stale in the reader's hands:
+
+- **`temporal_weight=1.0` is no longer the deployed config.** Two training
+  speed fixes (bf16 mixed precision, and fixing the sequence dataloader's
+  ~6x redundant reads) cut a full 20-epoch run from ~73min to ~12min,
+  making a proper finer sweep affordable. `temporal_weight=0.75` won
+  consistently on spatial accuracy (val_l1) with no meaningful temporal
+  cost, confirmed across two seeds and on the real long-sequence gate (not
+  just training-time metrics) — **`sweep_tw0.75_best.pt` is the deployed
+  checkpoint now**, referenced by `extract_weights.py`,
+  `gen_diff_fixtures_temporal.py`, `capture_intermediates.py`, and
+  `test_long_sequence.py`'s defaults.
+- **The "disocclusion/ghosting under heavier load" gap (below) has a first
+  answer.** The held-out validation block turns out to have almost no
+  disocclusion pressure anywhere (max 1.6% across all 500 frames) — a
+  structural property of this dataset, not fixable by picking a different
+  held-out window. Found and used a training-range window instead (frames
+  318-667, real disocclusion event) as a stress/diagnostic test (not a
+  generalisation test, since the model has seen that data) — the deployed
+  model degrades under it (mean L1 17% higher than the calm window,
+  ghosting present) but not catastrophically (no brightness drift, no
+  degenerate copying). A genuine held-out disocclusion test would still
+  need new captured data extending the camera path — not done.
+- **The "loss-weighting search was coarse" gap is addressed** by the finer
+  sweep above.
+- **One further speed idea was tested and rejected**: computing LPIPS at
+  half input resolution gave a real 1.38x training speedup but a
+  consistent, if modest, quality cost across three independent metrics —
+  not adopted, though the capability (`--lpips-scale`) is kept, off by
+  default.
+- **The colour-desaturation question (why `lpips_weight` was raised to
+  0.2) was checked directly against this model for the first time.** See
+  `docs/OPTIMISATIONS.md`'s colour-desaturation section for the result.
+
 ## Known gaps / notes for later phases
 
 - **Capture segfault** (this phase's dataset regeneration): the Node/Dawn
