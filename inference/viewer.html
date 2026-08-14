@@ -56,6 +56,19 @@
         opacity: 0.4;
         cursor: default;
       }
+      select {
+        background: #222;
+        color: #ddd;
+        border: 1px solid #444;
+        border-radius: 4px;
+        padding: 6px 10px;
+        font: inherit;
+        cursor: pointer;
+      }
+      select:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
       #realtimeToggle.active {
         background: #a52a2a;
         border-color: #d33;
@@ -64,6 +77,11 @@
       #pauseToggle.active {
         background: #a5822a;
         border-color: #d3a333;
+        color: #fff;
+      }
+      #coloredSceneToggle.active {
+        background: #2a6ba5;
+        border-color: #338ad3;
         color: #fff;
       }
       #status {
@@ -95,6 +113,10 @@
     <div id="app">
       <div id="controls">
         <div class="group">
+          <span>model</span>
+          <select id="modelSelect"></select>
+        </div>
+        <div class="group">
           <span>frame</span>
           <div id="frameButtons"></div>
         </div>
@@ -106,6 +128,7 @@
           <span>live</span>
           <button id="realtimeToggle">▶ realtime</button>
           <button id="pauseToggle" disabled>⏸ pause</button>
+          <button id="coloredSceneToggle">Coloured Scene</button>
         </div>
       </div>
       <div id="status">initialising…</div>

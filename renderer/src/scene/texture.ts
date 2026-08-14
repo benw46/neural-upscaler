@@ -30,15 +30,26 @@ function makeRgba(size: number, fill: (x: number, y: number) => [number, number,
   return data;
 }
 
+/** Multiplies a scalar grayscale value by a [0,1] tint, clamped to a valid
+ * byte. `[1,1,1]` (the default everywhere below) reproduces the original
+ * grayscale output exactly. Applied as a flat multiply on the existing
+ * validated luminance field rather than deriving colour independently, so
+ * whatever spatial-correlation property that field already has (see this
+ * file's header) carries over unchanged -- tinting can't reintroduce the
+ * aliasing failure mode a per-channel-independent scheme could. */
+function applyTint(c: number, tint: [number, number, number]): [number, number, number] {
+  return [Math.min(255, Math.round(c * tint[0])), Math.min(255, Math.round(c * tint[1])), Math.min(255, Math.round(c * tint[2]))];
+}
+
 /** Checkerboard with `cellSize`-texel cells (default 4, not 1) — cell
  * interiors are constant colour, so reprojection error concentrates at cell
  * boundaries (a small fraction of pixels) rather than everywhere. */
-export function checkerTexture(size = 64, cellSize = 6): Uint8Array {
+export function checkerTexture(size = 64, cellSize = 6, tint: [number, number, number] = [1, 1, 1]): Uint8Array {
   return makeRgba(size, (x, y) => {
     const cellX = Math.floor(x / cellSize);
     const cellY = Math.floor(y / cellSize);
     const c = (cellX + cellY) % 2 === 0 ? 235 : 25;
-    return [c, c, c];
+    return applyTint(c, tint);
   });
 }
 
@@ -66,7 +77,7 @@ function seededRng(seed: number): () => number {
  * what makes reprojection against it meaningful — see file header. Lattice
  * wraps at the edges so the tiled texture has no extra hard seam beyond the
  * ones already inherent to tiling. */
-export function noiseTexture(size = 128, seed = 1234, latticeSize = 6): Uint8Array {
+export function noiseTexture(size = 128, seed = 1234, latticeSize = 6, tint: [number, number, number] = [1, 1, 1]): Uint8Array {
   const rand = seededRng(seed);
   const lattice: number[][] = [];
   for (let ly = 0; ly <= latticeSize; ly++) {
@@ -96,15 +107,15 @@ export function noiseTexture(size = 128, seed = 1234, latticeSize = 6): Uint8Arr
   return makeRgba(size, (x, y) => {
     const n = sampleLattice(x / size, y / size);
     const c = Math.round(40 + n * 200);
-    return [c, c, c];
+    return applyTint(c, tint);
   });
 }
 
 /** Alternating stripe pattern, `stripeWidth` texels per band (default 4, not
  * 1) — band interiors are constant colour, same reasoning as checkerTexture. */
-export function stripeTexture(size = 64, stripeWidth = 6): Uint8Array {
+export function stripeTexture(size = 64, stripeWidth = 6, tint: [number, number, number] = [1, 1, 1]): Uint8Array {
   return makeRgba(size, (x) => {
     const c = Math.floor(x / stripeWidth) % 2 === 0 ? 250 : 10;
-    return [c, c, c];
+    return applyTint(c, tint);
   });
 }

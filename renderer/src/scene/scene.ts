@@ -32,12 +32,48 @@ function mulberry32(seed: number) {
 const GROUND_SIZE = 60;
 const SEED = 20260812;
 
+// Tints for the "coloured scene" variant -- multiplied onto the existing
+// validated grayscale value-noise/checker/stripe fields (see texture.ts's
+// applyTint), not derived independently, so geometry, lighting, and the
+// textures' spatial-correlation properties are all completely unchanged;
+// only the hue changes. Picked distinct from each other and from the
+// existing accent-cube colours (warm red-orange / blue, see colorCheckerTexture
+// below) so all groups stay visually distinguishable: warm tan/asphalt for
+// the ground, cool slate-blue for buildings, muted teal for rods.
+const GROUND_TINT: [number, number, number] = [0.58, 0.52, 0.45];
+const ROD_TINT: [number, number, number] = [0.35, 0.6, 0.55];
+
+// Buildings get a *palette*, not one flat tint -- one shared colour read as
+// dull, and the whole point is real colour variety to train/evaluate
+// against. Saturated on purpose ("vibrant"); kept distinct from each other
+// and from the existing accent-cube colours (warm red-orange / blue).
+// Assigned per building deterministically from its grid cell (gx, gz), NOT
+// drawn from `rng` -- consuming extra rng() calls here would shift every
+// rng() call after it (rods, accents), changing their positions between the
+// coloured and grayscale variants and breaking the "same geometry either
+// way" guarantee buildScene()'s own docstring promises.
+const BUILDING_PALETTE: [number, number, number][] = [
+  [0.85, 0.22, 0.28], // crimson
+  [0.95, 0.58, 0.12], // amber
+  [0.18, 0.72, 0.4], // emerald
+  [0.2, 0.55, 0.92], // azure
+  [0.62, 0.32, 0.85], // violet
+  [0.88, 0.78, 0.18], // gold
+];
+
 /** Builds the static test scene: a ground plane with a grid of "buildings"
  * of varying height, plus thin cylindrical rods scattered between them.
  * All content uses high-frequency procedural textures/geometry deliberately
  * (see texture.ts) so 540p rendering aliases and there's real upscaling
- * work to evaluate. Static scene only, per Spec 1 Part A step 3. */
-export function buildScene(): Scene {
+ * work to evaluate. Static scene only, per Spec 1 Part A step 3.
+ *
+ * `colored`: applies GROUND_TINT/ROD_TINT and the BUILDING_PALETTE to the
+ * groups that are otherwise pure grayscale (accents already have colour
+ * either way). Geometry and camera path are completely unaffected --
+ * `rng`'s call sequence below doesn't change based on this flag, so a
+ * coloured-scene dataset capture stays byte-identical in every way except
+ * texture colour to the existing seed-20260812 dataset. */
+export function buildScene(colored = false): Scene {
   const rng = mulberry32(SEED);
   const colliders: Collider[] = [];
 
@@ -47,7 +83,10 @@ export function buildScene(): Scene {
   // vectors, discovered while validating the Phase 0/1 gate.
   const ground = makePlane(GROUND_SIZE, GROUND_SIZE, 4);
 
-  const buildingMeshes: Mesh[] = [];
+  // One bucket per palette colour, so buildings can be grouped into one
+  // draw call per colour (SceneGroup = one merged mesh + one shared
+  // texture, see below) without touching the rng() call sequence at all.
+  const buildingMeshesByColor: Mesh[][] = BUILDING_PALETTE.map(() => []);
   const gridN = 6;
   const cellSize = GROUND_SIZE / gridN;
   for (let gx = 0; gx < gridN; gx++) {
@@ -61,7 +100,10 @@ export function buildScene(): Scene {
       const d = cellSize * (0.4 + rng() * 0.3);
       const h = 1 + rng() * 8;
       const box = makeBox(w, h, d, 1);
-      buildingMeshes.push(transformMesh(box, [cx, h / 2, cz], rng() * Math.PI * 2));
+      // Deterministic from grid position only -- not `rng()` -- see
+      // BUILDING_PALETTE's comment on why.
+      const colorIdx = (gx * 7 + gz * 13) % BUILDING_PALETTE.length;
+      buildingMeshesByColor[colorIdx].push(transformMesh(box, [cx, h / 2, cz], rng() * Math.PI * 2));
       // Circumscribed circle (half-diagonal) — rotation-independent, so no
       // need to track the box's rotation angle for collision purposes.
       colliders.push({ center: [cx, cz], radius: Math.hypot(w / 2, d / 2), minY: 0, maxY: h });
@@ -126,10 +168,29 @@ export function buildScene(): Scene {
     colliders.push({ center: [ax, az], radius: Math.hypot(s / 2, s / 2), minY: 0, maxY: s });
   }
 
+  const groundTint: [number, number, number] = colored ? GROUND_TINT : [1, 1, 1];
+  const rodTint: [number, number, number] = colored ? ROD_TINT : [1, 1, 1];
+
+  // One SceneGroup per palette colour that actually got at least one
+  // building (skip empty buckets rather than uploading a zero-vertex mesh).
+  // Grayscale variant: every bucket still renders with tint [1,1,1], so
+  // pixels are identical to the old single-group grayscale output --
+  // splitting into multiple draw calls doesn't change appearance, only how
+  // many groups the buildings are spread across.
+  const buildingGroups: SceneGroup[] = buildingMeshesByColor
+    .map((meshes, i) => ({ meshes, tint: colored ? BUILDING_PALETTE[i] : ([1, 1, 1] as [number, number, number]) }))
+    .filter(({ meshes }) => meshes.length > 0)
+    .map(({ meshes, tint }, i) => ({
+      name: `buildings-${i}`,
+      mesh: mergeMeshes(meshes),
+      textureData: checkerTexture(64, 6, tint),
+      textureSize: 64,
+    }));
+
   const groups: SceneGroup[] = [
-    { name: "ground", mesh: ground, textureData: noiseTexture(128, SEED), textureSize: 128 },
-    { name: "buildings", mesh: mergeMeshes(buildingMeshes), textureData: checkerTexture(64), textureSize: 64 },
-    { name: "rods", mesh: mergeMeshes(rodMeshes), textureData: stripeTexture(64), textureSize: 64 },
+    { name: "ground", mesh: ground, textureData: noiseTexture(128, SEED, 6, groundTint), textureSize: 128 },
+    ...buildingGroups,
+    { name: "rods", mesh: mergeMeshes(rodMeshes), textureData: stripeTexture(64, 6, rodTint), textureSize: 64 },
     { name: "accents", mesh: mergeMeshes(accentMeshes), textureData: colorCheckerTexture(64, [220, 90, 60], [40, 60, 200]), textureSize: 64 },
   ];
 

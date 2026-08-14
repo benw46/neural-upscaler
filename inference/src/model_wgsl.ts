@@ -246,6 +246,22 @@ export class WgslUNet {
   }
 
   async loadWeights(manifestUrl: string, weightsUrl: string) {
+    // Safe to call more than once on the same instance (e.g. switching
+    // models from the viewer's dropdown) -- destroy any previously loaded
+    // weight/bias buffers first, after waiting for any in-flight GPU work
+    // that might still reference them to finish. Skipping this would leak
+    // a full set of per-layer buffers on every switch, the same class of
+    // bug as the original forward()-intermediates leak (see
+    // WgslUNet.releaseIntermediates()).
+    if (this.layerBuffers.size > 0) {
+      await this.device.queue.onSubmittedWorkDone();
+      for (const { weight, bias } of this.layerBuffers.values()) {
+        weight.destroy();
+        bias.destroy();
+      }
+      this.layerBuffers.clear();
+    }
+
     const manifestRes = await fetch(manifestUrl);
     this.manifest = await manifestRes.json();
     const weightsRes = await fetch(weightsUrl);

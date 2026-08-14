@@ -172,14 +172,14 @@ export class LiveScenePipeline {
   private lastState: FrameCameraState | null = null;
   private lastNetworkOutput: Float32Array | null = null;
 
-  private constructor(device: GPUDevice, unet: WgslUNet, hasF16: boolean) {
+  private constructor(device: GPUDevice, unet: WgslUNet, hasF16: boolean, colored: boolean) {
     this.device = device;
     this.unet = unet;
     this.hasF16 = hasF16;
     this.bytesPerElement = hasF16 ? 2 : 4;
 
     const prelude = scalarPrelude(hasF16);
-    this.renderer = new SceneRenderer(device, mainShaderSource);
+    this.renderer = new SceneRenderer(device, mainShaderSource, colored);
     this.gbufferLow = new GBuffer(device, IN_W, IN_H);
     this.gbufferHigh = new GBuffer(device, GT_W, GT_H);
     this.cameraPath = new ScriptedCameraPath(SEED);
@@ -262,8 +262,8 @@ export class LiveScenePipeline {
     });
   }
 
-  static async create(device: GPUDevice, unet: WgslUNet, hasF16: boolean): Promise<LiveScenePipeline> {
-    return new LiveScenePipeline(device, unet, hasF16);
+  static async create(device: GPUDevice, unet: WgslUNet, hasF16: boolean, colored = false): Promise<LiveScenePipeline> {
+    return new LiveScenePipeline(device, unet, hasF16, colored);
   }
 
   private buildDownsampleBindGroup(): GPUBindGroup {

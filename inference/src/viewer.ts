@@ -44,6 +44,26 @@ const frameButtonsEl = document.querySelector<HTMLDivElement>("#frameButtons")!;
 const modeButtonsEl = document.querySelector<HTMLDivElement>("#modeButtons")!;
 const realtimeToggleEl = document.querySelector<HTMLButtonElement>("#realtimeToggle")!;
 const pauseToggleEl = document.querySelector<HTMLButtonElement>("#pauseToggle")!;
+const coloredSceneToggleEl = document.querySelector<HTMLButtonElement>("#coloredSceneToggle")!;
+const modelSelectEl = document.querySelector<HTMLSelectElement>("#modelSelect")!;
+
+/** Available trained checkpoints, as their already-canonicalised WGSL
+ * weight exports under inference/public/weights/ (see
+ * export/extract_weights.py) -- add an entry here once a new model has
+ * been through that same export step, not before. Only one exists so far:
+ * the deployed model, trained entirely on the original grayscale-textured
+ * scene. A future colour-scene-trained model would get its own id/label
+ * and its own weights/<id>/ subdirectory. */
+interface ModelOption {
+  id: string;
+  label: string;
+  manifestUrl: string;
+  weightsUrl: string;
+}
+const MODELS: ModelOption[] = [
+  { id: "greyscale", label: "Greyscale 1080p", manifestUrl: "/weights/manifest.json", weightsUrl: "/weights/weights.bin" },
+  { id: "colour", label: "Colour 1080p", manifestUrl: "/weights/colour/manifest.json", weightsUrl: "/weights/colour/weights.bin" },
+];
 
 function setStatus(line: string) {
   statusEl.textContent = line;
@@ -210,6 +230,7 @@ async function main() {
   let currentMode: DisplayMode = "input";
   let realtimeActive = false;
   let livePaused = false;
+  let sceneColored = false;
   let pipeline: LiveScenePipeline | null = null; // lazily built on first realtime use -- not every visit needs the live-scene machinery
 
   /** Shared by runRealtimeLoop (the running case) and the mode-button
@@ -360,6 +381,30 @@ async function main() {
     drawNetworkOutput(out);
   }
 
+  for (const model of MODELS) {
+    const opt = document.createElement("option");
+    opt.value = model.id;
+    opt.textContent = model.label;
+    modelSelectEl.appendChild(opt);
+  }
+  modelSelectEl.addEventListener("change", async () => {
+    if (realtimeActive) return; // shouldn't be reachable (disabled during realtime), guarded anyway
+    const selected = MODELS.find((m) => m.id === modelSelectEl.value)!;
+    modelSelectEl.disabled = true;
+    setButtonsEnabled(false);
+    setStatus(`loading model "${selected.label}"…`);
+    await unet.loadWeights(selected.manifestUrl, selected.weightsUrl);
+    // Every cached prediction was computed with the *previous* model's
+    // weights -- keeping them around would silently show stale output
+    // under the new model's name. Static frame data (frameCache) is
+    // input-only and doesn't depend on the model, so it stays.
+    networkCache.clear();
+    modelSelectEl.disabled = false;
+    setButtonsEnabled(true);
+    setStatus(`model switched to "${selected.label}"`);
+    await render();
+  });
+
   for (const idx of manifest.frames) {
     const btn = document.createElement("button");
     btn.textContent = String(idx);
@@ -427,6 +472,8 @@ async function main() {
       realtimeToggleEl.classList.remove("active");
       setPaused(false);
       pauseToggleEl.disabled = true;
+      coloredSceneToggleEl.disabled = false;
+      modelSelectEl.disabled = false;
       setFrameButtonsEnabled(true);
       await render(); // redraw whatever the frame/mode buttons currently point at, not a stale realtime frame
       return;
@@ -441,13 +488,27 @@ async function main() {
       btn.classList.remove("active"); // no static frame corresponds to the live scene
     }
 
+    coloredSceneToggleEl.disabled = true; // scene variant is fixed for the lifetime of a pipeline -- see coloredSceneToggleEl's own handler
+    modelSelectEl.disabled = true; // avoid a switch racing with the live loop's in-flight forward passes -- see modelSelectEl's own handler
     if (!pipeline) {
-      setStatus("realtime — building live-scene pipeline (first use only)…");
-      pipeline = await LiveScenePipeline.create(device, unet, hasShaderF16);
+      setStatus(`realtime — building live-scene pipeline (first use only)…`);
+      pipeline = await LiveScenePipeline.create(device, unet, hasShaderF16, sceneColored);
     }
     realtimeActive = true;
     pauseToggleEl.disabled = false;
     runRealtimeLoop(); // intentionally not awaited -- runs in the background until the toggle flips realtimeActive back off
+  });
+
+  coloredSceneToggleEl.addEventListener("click", () => {
+    if (realtimeActive) return; // shouldn't be reachable (disabled during realtime), guarded anyway
+    sceneColored = !sceneColored;
+    coloredSceneToggleEl.classList.toggle("active", sceneColored);
+    // Scene colour is baked into the pipeline's SceneRenderer at construction
+    // time (see live_pipeline.ts) -- discard any already-built pipeline so
+    // the next realtime start rebuilds it with the new setting, rather than
+    // silently continuing to show the old scene variant.
+    pipeline = null;
+    setStatus(sceneColored ? "coloured scene enabled — will apply next time realtime starts" : "coloured scene disabled — will apply next time realtime starts");
   });
 
   pauseToggleEl.addEventListener("click", () => {

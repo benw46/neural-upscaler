@@ -17,10 +17,10 @@ export class SceneRenderer {
   private readonly device: GPUDevice;
   readonly colliders: Collider[];
 
-  constructor(device: GPUDevice, mainShaderSource: string) {
+  constructor(device: GPUDevice, mainShaderSource: string, colored = false) {
     this.device = device;
     this.pipeline = new MainPipeline(device, mainShaderSource);
-    const scene = buildScene();
+    const scene = buildScene(colored);
     this.groups = this.pipeline.uploadGroups(scene.groups);
     this.colliders = scene.colliders;
   }
