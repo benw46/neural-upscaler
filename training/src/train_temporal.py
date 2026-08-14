@@ -58,16 +58,21 @@ RUN_LABEL = "temporal_w1.0_final"  # short tag identifying this config, used in 
 
 
 def parse_args() -> argparse.Namespace:
-    """CLI override for the colour-loss lpips_weight sweep (see
-    training/src/measure_color_sweep.py) -- defaults reproduce the exact
-    recipe that produced the currently-deployed checkpoint (lpips_weight=0.1,
+    """CLI overrides -- defaults reproduce the exact recipe that produced
+    the original deployed checkpoint (lpips_weight=0.1, temporal_weight=1.0,
     run_label="temporal_w1.0_final"), so calling this script with no
-    arguments is unchanged from before. TEMPORAL_WEIGHT is deliberately not
-    made a CLI arg here -- it's the already-validated result of Spec 3's own
-    sweep (see the comment above), not something this pass is re-litigating."""
+    arguments is unchanged from before. `--temporal-weight` was deliberately
+    NOT a CLI arg originally (Spec 3's own coarse sweep -- 0.0/0.5/1.0/4.0,
+    4 epochs each -- had already chosen 1.0, see the comment above) but that
+    sweep is explicitly being re-run finer now that training is ~6x faster
+    (see MEMORY.md), so it's exposed here too. Always pass --run-label
+    explicitly alongside a non-default --temporal-weight, so a sweep run
+    can't collide with (and overwrite) any existing checkpoint family."""
     p = argparse.ArgumentParser()
     p.add_argument("--lpips-weight", type=float, default=0.1)
     p.add_argument("--run-label", type=str, default=RUN_LABEL)
+    p.add_argument("--temporal-weight", type=float, default=TEMPORAL_WEIGHT)
+    p.add_argument("--seed", type=int, default=SEED)
     return p.parse_args()
 
 
@@ -207,10 +212,12 @@ def log_rollout_images(writer: SummaryWriter, model, val_ds: SequenceDataset, lo
 
 
 def main():
+    global TEMPORAL_WEIGHT
     args = parse_args()
     run_label = args.run_label
+    TEMPORAL_WEIGHT = args.temporal_weight
 
-    seed_everything(SEED)
+    seed_everything(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}  run: {run_label}  temporal_weight: {TEMPORAL_WEIGHT}  lpips_weight: {args.lpips_weight}")
 

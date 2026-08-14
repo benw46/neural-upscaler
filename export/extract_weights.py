@@ -22,7 +22,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "training" / "src"))
 from model import SpatialUNet  # noqa: E402
 
-DEFAULT_CHECKPOINT = Path(__file__).resolve().parent.parent / "training" / "checkpoints_temporal" / "temporal_w1.0_lpips02_best.pt"
+DEFAULT_CHECKPOINT = Path(__file__).resolve().parent.parent / "training" / "checkpoints_temporal" / "sweep_tw0.75_best.pt"
 OUT_DIR = Path(__file__).resolve().parent.parent / "inference" / "public" / "weights"
 
 # (layer name, has LeakyReLU activation) -- every conv has one except the

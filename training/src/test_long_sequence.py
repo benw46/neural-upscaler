@@ -25,7 +25,7 @@ from model import SpatialUNet  # noqa: E402
 from warp import compute_disocclusion_mask, upsample_motion, warp_previous_output  # noqa: E402
 
 RUN_DIR = Path(r"E:\neural-upscaler\data\seed-20260812")
-DEFAULT_CHECKPOINT = Path(__file__).resolve().parent.parent / "checkpoints_temporal" / "temporal_w1.0_final_best.pt"
+DEFAULT_CHECKPOINT = Path(__file__).resolve().parent.parent / "checkpoints_temporal" / "sweep_tw0.75_best.pt"
 DEFAULT_OUT_DIR = Path(__file__).resolve().parent.parent / "long_sequence_results"
 SEQUENCE_LENGTH = 350  # gate requires 300+; some margin
 
@@ -34,10 +34,16 @@ def parse_args() -> argparse.Namespace:
     """CLI overrides so re-running this gate against a new checkpoint (e.g.
     a colour-loss sweep candidate, see measure_color_sweep.py) can't
     silently overwrite the deployed model's own gate results -- defaults
-    reproduce the original invocation exactly."""
+    reproduce the original invocation exactly. `--start-frame` (default
+    None -> val_idx[0], the original behaviour) lets this same gate machinery
+    run against a *different* window -- e.g. a stress test against a heavy
+    disocclusion event found in the training range (not held-out, so not a
+    generalisation test, but real signal on failure-mode behaviour that the
+    calm held-out block never exercises)."""
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     p.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    p.add_argument("--start-frame", type=int, default=None)
     return p.parse_args()
 
 
@@ -76,9 +82,16 @@ def main():
     input_w, input_h = header["inputWidth"], header["inputHeight"]
     gt_w, gt_h = header["gtWidth"], header["gtHeight"]
 
-    _, val_idx = train_val_split(str(RUN_DIR), val_fraction=0.25)
-    start_frame = val_idx[0]
-    assert len(val_idx) >= SEQUENCE_LENGTH, f"held-out block ({len(val_idx)} frames) shorter than requested sequence ({SEQUENCE_LENGTH})"
+    train_idx, val_idx = train_val_split(str(RUN_DIR), val_fraction=0.25)
+    if args.start_frame is None:
+        start_frame = val_idx[0]
+        assert len(val_idx) >= SEQUENCE_LENGTH, f"held-out block ({len(val_idx)} frames) shorter than requested sequence ({SEQUENCE_LENGTH})"
+    else:
+        start_frame = args.start_frame
+        last_frame_available = train_idx[-1] if start_frame in train_idx else val_idx[-1]
+        assert start_frame + SEQUENCE_LENGTH - 1 <= last_frame_available, f"requested window ({start_frame}..{start_frame + SEQUENCE_LENGTH - 1}) runs past the last available frame ({last_frame_available})"
+        in_val = start_frame >= val_idx[0]
+        print(f"NOTE: --start-frame given -- rolling out {'the held-out validation' if in_val else 'the TRAINING (not held-out)'} range. {'This is still a fair generalisation test.' if in_val else 'This is a stress/diagnostic test only -- the model has seen this data during training, so results here say nothing about generalisation.'}")
     frame_range = range(start_frame, start_frame + SEQUENCE_LENGTH)
     print(f"rolling out frames {frame_range.start}..{frame_range.stop - 1} ({SEQUENCE_LENGTH} frames)")
 
