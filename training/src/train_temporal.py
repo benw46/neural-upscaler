@@ -70,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     can't collide with (and overwrite) any existing checkpoint family."""
     p = argparse.ArgumentParser()
     p.add_argument("--lpips-weight", type=float, default=0.1)
+    p.add_argument("--lpips-scale", type=float, default=1.0)
     p.add_argument("--run-label", type=str, default=RUN_LABEL)
     p.add_argument("--temporal-weight", type=float, default=TEMPORAL_WEIGHT)
     p.add_argument("--seed", type=int, default=SEED)
@@ -228,7 +229,7 @@ def main():
     print(f"val sequences: {len(val_ds)}")
 
     model = SpatialUNet(in_channels=8).to(device)
-    loss_fn = CombinedLoss(l1_weight=1.0, lpips_weight=args.lpips_weight).to(device)
+    loss_fn = CombinedLoss(l1_weight=1.0, lpips_weight=args.lpips_weight, lpips_scale=args.lpips_scale).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 

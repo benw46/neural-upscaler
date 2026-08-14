@@ -82,6 +82,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--l1-weight", type=float, default=1.0)
     p.add_argument("--lpips-weight", type=float, default=0.1)
+    p.add_argument("--lpips-scale", type=float, default=1.0)
     p.add_argument("--epochs", type=int, default=EPOCHS)
     p.add_argument("--run-label", type=str, default=None)
     return p.parse_args()
@@ -169,7 +170,7 @@ def main():
     print(f"raw fetches/epoch: {len(train_loader)} (file-opens: {len(train_idx)})  approx optimizer steps/epoch: {approx_steps_per_epoch}  total planned steps: {approx_steps_per_epoch * epochs}")
 
     model = SpatialUNet().to(device)
-    loss_fn = CombinedLoss(l1_weight=args.l1_weight, lpips_weight=args.lpips_weight).to(device)
+    loss_fn = CombinedLoss(l1_weight=args.l1_weight, lpips_weight=args.lpips_weight, lpips_scale=args.lpips_scale).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 

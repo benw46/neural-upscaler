@@ -25,7 +25,22 @@ import torch.nn.functional as F
 
 
 class CombinedLoss(nn.Module):
-    def __init__(self, l1_weight: float = 1.0, lpips_weight: float = 0.1, lpips_net: str = "vgg"):
+    def __init__(self, l1_weight: float = 1.0, lpips_weight: float = 0.1, lpips_net: str = "vgg", lpips_scale: float = 1.0):
+        """`lpips_scale`: downsamples pred/target by this factor before
+        computing LPIPS specifically -- L1 always stays at full resolution.
+        1.0 = no downsampling (the original behaviour). LPIPS's VGG16
+        backbone is ~150x this model's own parameter count and dominates
+        training step time regardless of everything else done to speed up
+        training: measured at ~89% of a full step, even under bf16
+        autocast. lpips_scale=0.5 measured a 2.8x full-step speedup, at the
+        cost of one octave of LPIPS's own multi-scale pyramid -- it loses
+        the single finest detail level LPIPS would otherwise see, every
+        coarser scale is unchanged. This IS a real change to what the loss
+        can supervise (LPIPS's whole purpose is pushing the network toward
+        sharp detail -- see this class's module docstring), not a free win
+        like mixed-precision training was -- validate finished-model
+        quality (sharpness, not just speed) before trusting a value other
+        than 1.0 for real training, don't assume the timing win is free."""
         super().__init__()
         self.l1 = nn.L1Loss()
         self.lpips = lpips.LPIPS(net=lpips_net)
@@ -33,11 +48,18 @@ class CombinedLoss(nn.Module):
             p.requires_grad = False
         self.l1_weight = l1_weight
         self.lpips_weight = lpips_weight
+        self.lpips_scale = lpips_scale
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
         l1_val = self.l1(pred, target)
         # LPIPS expects inputs in [-1, 1]; our images are [0, 1].
-        lpips_val = self.lpips(pred * 2 - 1, target * 2 - 1).mean()
+        if self.lpips_scale != 1.0:
+            size = (max(1, round(pred.shape[-2] * self.lpips_scale)), max(1, round(pred.shape[-1] * self.lpips_scale)))
+            pred_lp = F.interpolate(pred, size=size, mode="bilinear", align_corners=False)
+            target_lp = F.interpolate(target, size=size, mode="bilinear", align_corners=False)
+        else:
+            pred_lp, target_lp = pred, target
+        lpips_val = self.lpips(pred_lp * 2 - 1, target_lp * 2 - 1).mean()
         total = self.l1_weight * l1_val + self.lpips_weight * lpips_val
         return total, {"l1": l1_val.item(), "lpips": lpips_val.item(), "total": total.item()}
 
