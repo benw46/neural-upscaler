@@ -11,6 +11,7 @@ contiguous weight values together. PyTorch's native Conv2d weight layout is
 shader do strided reads every dispatch.
 """
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -21,7 +22,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "training" / "src"))
 from model import SpatialUNet  # noqa: E402
 
-CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "training" / "checkpoints_temporal" / "temporal_w1.0_final_best.pt"
+DEFAULT_CHECKPOINT = Path(__file__).resolve().parent.parent / "training" / "checkpoints_temporal" / "temporal_w1.0_lpips02_best.pt"
 OUT_DIR = Path(__file__).resolve().parent.parent / "inference" / "public" / "weights"
 
 # (layer name, has LeakyReLU activation) -- every conv has one except the
@@ -46,11 +47,19 @@ LAYERS = [
 ]
 
 
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    return p.parse_args()
+
+
 def main():
+    args = parse_args()
     model = SpatialUNet(in_channels=8)
-    model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location="cpu"))
+    model.load_state_dict(torch.load(args.checkpoint, map_location="cpu"))
     model.eval()
     state = model.state_dict()
+    print(f"loaded checkpoint: {args.checkpoint}")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     blob_parts = []

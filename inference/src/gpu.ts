@@ -9,6 +9,13 @@ export interface GpuContext {
   device: GPUDevice;
   hasShaderF16: boolean;
   hasTimestampQuery: boolean;
+  /** Actually-granted `device.limits.maxComputeWorkgroupStorageSize`, not the
+   * adapter's reported maximum -- WebGPU grants only the spec-minimum 16384
+   * bytes unless a device explicitly requests more via `requiredLimits`,
+   * confirmed on this exact adapter (16384 default vs 32768 available) by
+   * probing both paths directly. conv_tiled.wgsl's Cin-chunk sizing reads
+   * this rather than assuming the spec minimum. */
+  maxWorkgroupStorageSize: number;
 }
 
 export async function acquireGpu(): Promise<GpuContext> {
@@ -34,7 +41,16 @@ export async function acquireGpu(): Promise<GpuContext> {
   if (hasShaderF16) requiredFeatures.push("shader-f16");
   if (hasTimestampQuery) requiredFeatures.push("timestamp-query");
 
-  const device = await adapter.requestDevice({ requiredFeatures });
+  // Request the adapter's own reported maximum explicitly -- requestDevice()
+  // grants only the spec-minimum 16384 bytes of workgroup storage by
+  // default, even when the adapter supports more (confirmed on this exact
+  // adapter: 16384 default vs 32768 available). Asking for adapter.limits'
+  // value is safe by construction -- it can never exceed what the adapter
+  // itself just reported.
+  const device = await adapter.requestDevice({
+    requiredFeatures,
+    requiredLimits: { maxComputeWorkgroupStorageSize: adapter.limits.maxComputeWorkgroupStorageSize },
+  });
   device.lost.then((info) => {
     console.error(`[gpu] device lost: ${info.reason} — ${info.message}`);
   });
@@ -42,9 +58,12 @@ export async function acquireGpu(): Promise<GpuContext> {
     console.error(`[gpu] uncaptured error: ${(event as GPUUncapturedErrorEvent).error.message}`);
   });
 
+  const maxWorkgroupStorageSize = device.limits.maxComputeWorkgroupStorageSize;
+
   console.log(`[gpu] adapter: ${adapterName}`);
   console.log(`[gpu] shader-f16: ${hasShaderF16}`);
   console.log(`[gpu] timestamp-query: ${hasTimestampQuery}`);
+  console.log(`[gpu] maxComputeWorkgroupStorageSize: ${maxWorkgroupStorageSize} bytes (adapter max: ${adapter.limits.maxComputeWorkgroupStorageSize})`);
 
-  return { adapter, device, hasShaderF16, hasTimestampQuery };
+  return { adapter, device, hasShaderF16, hasTimestampQuery, maxWorkgroupStorageSize };
 }

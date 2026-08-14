@@ -12,6 +12,7 @@ script was run under, and CLAUDE.md for why: "Loss weighting for temporal
 consistency... is empirical, not derivable."
 """
 
+import argparse
 import datetime
 import sys
 import time
@@ -53,6 +54,20 @@ VAL_EVERY = 2
 # solution Spec 3 warns about -- confirmed and reproduced there).
 TEMPORAL_WEIGHT = 1.0
 RUN_LABEL = "temporal_w1.0_final"  # short tag identifying this config, used in the tensorboard/checkpoint dir name
+
+
+def parse_args() -> argparse.Namespace:
+    """CLI override for the colour-loss lpips_weight sweep (see
+    training/src/measure_color_sweep.py) -- defaults reproduce the exact
+    recipe that produced the currently-deployed checkpoint (lpips_weight=0.1,
+    run_label="temporal_w1.0_final"), so calling this script with no
+    arguments is unchanged from before. TEMPORAL_WEIGHT is deliberately not
+    made a CLI arg here -- it's the already-validated result of Spec 3's own
+    sweep (see the comment above), not something this pass is re-litigating."""
+    p = argparse.ArgumentParser()
+    p.add_argument("--lpips-weight", type=float, default=0.1)
+    p.add_argument("--run-label", type=str, default=RUN_LABEL)
+    return p.parse_args()
 
 
 def seed_everything(seed: int):
@@ -166,9 +181,12 @@ def log_rollout_images(writer: SummaryWriter, model, val_ds: SequenceDataset, lo
 
 
 def main():
+    args = parse_args()
+    run_label = args.run_label
+
     seed_everything(SEED)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"device: {device}  run: {RUN_LABEL}  temporal_weight: {TEMPORAL_WEIGHT}")
+    print(f"device: {device}  run: {run_label}  temporal_weight: {TEMPORAL_WEIGHT}  lpips_weight: {args.lpips_weight}")
 
     train_idx, val_idx = train_val_split(RUN_DIR, val_fraction=VAL_FRACTION)
     print(f"train frames: {len(train_idx)}  val frames: {len(val_idx)}")
@@ -179,12 +197,12 @@ def main():
     print(f"train sequences: {len(train_ds)}  val sequences: {len(val_ds)}  batches/epoch: {len(train_loader)}")
 
     model = SpatialUNet(in_channels=8).to(device)
-    loss_fn = CombinedLoss().to(device)
+    loss_fn = CombinedLoss(l1_weight=1.0, lpips_weight=args.lpips_weight).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     CHECKPOINT_DIR.mkdir(exist_ok=True)
-    run_name = f"{RUN_LABEL}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_name = f"{run_label}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     writer = SummaryWriter(log_dir=str(TENSORBOARD_DIR / run_name))
     print(f"tensorboard logdir: {TENSORBOARD_DIR / run_name}")
 
@@ -229,21 +247,21 @@ def main():
             print(f"epoch {epoch + 1}: train_l1={epoch_totals['l1']:.5f} val_l1={val_metrics['l1']:.5f} val_temporal={val_metrics['temporal']:.5f}")
             if val_metrics["l1"] < best_val_l1:
                 best_val_l1 = val_metrics["l1"]
-                torch.save(model.state_dict(), CHECKPOINT_DIR / f"{RUN_LABEL}_best.pt")
+                torch.save(model.state_dict(), CHECKPOINT_DIR / f"{run_label}_best.pt")
                 print(f"  new best val_l1={val_metrics['l1']:.5f}, saved checkpoint")
         else:
             print(f"epoch {epoch + 1}: train_l1={epoch_totals['l1']:.5f} train_temporal={epoch_totals['temporal']:.5f}")
 
         history.append(record)
 
-    torch.save(model.state_dict(), CHECKPOINT_DIR / f"{RUN_LABEL}_final.pt")
+    torch.save(model.state_dict(), CHECKPOINT_DIR / f"{run_label}_final.pt")
     writer.close()
     print(f"\ntraining complete in {time.time() - t0:.1f}s")
     print(f"best val_l1: {best_val_l1:.5f}")
 
     import json
 
-    (CHECKPOINT_DIR / f"{RUN_LABEL}_history.json").write_text(json.dumps(history, indent=2))
+    (CHECKPOINT_DIR / f"{run_label}_history.json").write_text(json.dumps(history, indent=2))
 
 
 if __name__ == "__main__":

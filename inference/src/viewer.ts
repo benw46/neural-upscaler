@@ -1,44 +1,58 @@
 import { acquireGpu } from "./gpu.ts";
 import { WgslUNet } from "./model_wgsl.ts";
+import { LiveScenePipeline, IN_W, IN_H, GT_W, GT_H, IN_H_PAD, IN_CHANNELS, DEPTH_NORM, type DisplayMode, type LiveFrameResult } from "./live_pipeline.ts";
 
-/** Live 540p-input vs WGSL-network-1080p-output viewer, on a handful of
- * held-out frames copied from the E:\ dataset (see export/copy_demo_frames.py).
+/** Live 540p-input vs WGSL-network-1080p-output viewer, with two distinct
+ * data sources sharing the same three-way display mode (540p input /
+ * network 1080p / ground truth 1080p):
  *
- * Deliberately not a live/interactive camera demo: the hand-written WGSL
- * kernel runs at ~3.3s/frame at this resolution (see docs/PHASE-4-SUMMARY.md)
- * so a per-frame toggle at camera framerate would just be a slideshow. This
- * shows a fixed frame in three states -- the raw 540p input, the network's
- * 1080p reconstruction, and the actual captured 1080p ground truth -- so
- * quality is easy to judge without pretending this runs in real time.
+ * - **Static** (default): a handful of held-out frames copied from the
+ *   E:\ dataset (see export/copy_demo_frames.py). Cold-started (zeroed
+ *   warped-previous, fully-invalid disocclusion mask) -- exactly frame 0's
+ *   input in every training sequence (see train_temporal.py), a validated
+ *   code path, not an approximation.
+ * - **Realtime** (the "realtime" toggle): drives LiveScenePipeline (see
+ *   that file) -- the project's live scripted-camera-path scene, rendered
+ *   and upscaled continuously, with *real* accumulated temporal history
+ *   (real motion-vector warping, not cold-started) and a genuine live
+ *   unjittered-high-res render for the "ground truth" mode (not
+ *   supersampled -- see live_pipeline.ts's docstring). All three display
+ *   modes stay live and switchable while the loop keeps running -- clicking
+ *   a mode button just changes what the *next* frame draws, it doesn't
+ *   restart or stall the loop.
  *
- * Temporal input is cold-started (zeroed warped-previous, fully-invalid
- * disocclusion mask) rather than fed real frame-to-frame history -- exactly
- * frame 0's input in every training sequence (see train_temporal.py), a
- * validated code path, not an approximation. Building a live WGSL warp step
- * so history genuinely accumulates across a sequence of demo frames is real
- * additional work, out of scope here (see the owner's answer in this
- * session's viewer-scoping questions).
+ * The two sources are deliberately kept distinct rather than blended: the
+ * static frames are fixed, previously-captured content useful for
+ * comparing this project's own held-out gate frames; realtime is the
+ * project's own live scene. Switching the "realtime" toggle switches which
+ * source the three display-mode buttons are showing.
+ *
+ * The "pause" button (only enabled during realtime) freezes the scripted
+ * camera path exactly where it is -- via LiveScenePipeline.redisplay(),
+ * which re-shows the *same* already-rendered frame in a different display
+ * mode without advancing anything, rather than stopping the loop and
+ * restarting it. Mode buttons stay instantly responsive while paused
+ * (no waiting for the next loop tick, unlike the running/unpaused case);
+ * resuming continues the camera path from exactly where it was paused.
  */
 
-const IN_W = 960;
-const IN_H = 540;
-const IN_H_PAD = 544; // pad_to_multiple(x, 8) on the height only -- 960 is already a multiple of 8
-const GT_W = 1920;
-const GT_H = 1080; // network output before cropping is (IN_H_PAD*2, GT_W, 3) = (1088, 1920, 3); pixel-shuffle doubles both input dims
-const DEPTH_NORM = 50.0; // training/src/dataset.py -- must match exactly, see CLAUDE.md preprocessing-parity note
-const IN_CHANNELS = 8;
-
-type Mode = "input" | "network" | "groundtruth";
-
 const statusEl = document.querySelector<HTMLDivElement>("#status")!;
+const fpsEl = document.querySelector<HTMLDivElement>("#fpsReadout")!;
 const canvas = document.querySelector<HTMLCanvasElement>("#canvas")!;
 const ctx = canvas.getContext("2d")!;
 const frameButtonsEl = document.querySelector<HTMLDivElement>("#frameButtons")!;
 const modeButtonsEl = document.querySelector<HTMLDivElement>("#modeButtons")!;
+const realtimeToggleEl = document.querySelector<HTMLButtonElement>("#realtimeToggle")!;
+const pauseToggleEl = document.querySelector<HTMLButtonElement>("#pauseToggle")!;
 
 function setStatus(line: string) {
   statusEl.textContent = line;
   console.log(line);
+}
+
+function setFps(line: string, idle: boolean) {
+  fpsEl.textContent = line;
+  fpsEl.classList.toggle("idle", idle);
 }
 
 interface Manifest {
@@ -80,7 +94,9 @@ async function loadFrame(idx: number): Promise<FrameData> {
  * disocclusion(1), reflect-padded 540->544 rows to match
  * training/src/dataset.py's pad_to_multiple(mode="reflect") exactly --
  * preprocessing parity between training and inference is a named
- * CLAUDE.md fragile-logic item. */
+ * CLAUDE.md fragile-logic item. Static-frame path only -- the realtime path
+ * builds this on the GPU (see pack_input.wgsl) with real warp channels
+ * instead of the zeros/ones below. */
 function buildNetworkInput(frame: FrameData): Float32Array {
   const out = new Float32Array(IN_H_PAD * IN_W * IN_CHANNELS);
   for (let y = 0; y < IN_H_PAD; y++) {
@@ -104,11 +120,13 @@ function buildNetworkInput(frame: FrameData): Float32Array {
   return out;
 }
 
-/** Nearest-neighbour 2x upscale of the raw 540p colour into a 1920x1080
- * ImageData, so the "raw input" view fills the same canvas as the other two
- * modes -- deliberately blocky, that blockiness *is* the point of the
- * comparison. */
-function drawInput(frame: FrameData) {
+/** Nearest-neighbour 2x upscale of raw 540p colour (IN_H, IN_W, 4) into a
+ * 1920x1080 ImageData, so the "raw input" view fills the same canvas as the
+ * other two modes -- deliberately blocky, that blockiness *is* the point of
+ * the comparison. Shared by both the static frames (frame.color) and the
+ * realtime pipeline's live-rendered colour (LiveFrameResult.inputColour) --
+ * same (H, W, 4) Float16Array layout either way. */
+function drawInput(colour: Float16Array) {
   const img = ctx.createImageData(GT_W, GT_H);
   for (let y = 0; y < GT_H; y++) {
     const srcY = y >> 1;
@@ -116,29 +134,33 @@ function drawInput(frame: FrameData) {
       const srcX = x >> 1;
       const srcBase = (srcY * IN_W + srcX) * 4;
       const dstBase = (y * GT_W + x) * 4;
-      img.data[dstBase + 0] = clamp255(frame.color[srcBase + 0]);
-      img.data[dstBase + 1] = clamp255(frame.color[srcBase + 1]);
-      img.data[dstBase + 2] = clamp255(frame.color[srcBase + 2]);
+      img.data[dstBase + 0] = clamp255(colour[srcBase + 0]);
+      img.data[dstBase + 1] = clamp255(colour[srcBase + 1]);
+      img.data[dstBase + 2] = clamp255(colour[srcBase + 2]);
       img.data[dstBase + 3] = 255;
     }
   }
   ctx.putImageData(img, 0, 0);
 }
 
-function drawGroundTruth(frame: FrameData) {
+/** Shared by the static captured ground truth (frame.gt) and the realtime
+ * pipeline's live unjittered-high-res render (LiveFrameResult.groundTruthColour)
+ * -- same (GT_H, GT_W, 4) Float16Array layout either way. The realtime one is
+ * NOT supersampled like the static/offline one is, see live_pipeline.ts. */
+function drawGroundTruth(colour: Float16Array) {
   const img = ctx.createImageData(GT_W, GT_H);
   for (let i = 0; i < GT_W * GT_H; i++) {
-    img.data[i * 4 + 0] = clamp255(frame.gt[i * 4 + 0]);
-    img.data[i * 4 + 1] = clamp255(frame.gt[i * 4 + 1]);
-    img.data[i * 4 + 2] = clamp255(frame.gt[i * 4 + 2]);
+    img.data[i * 4 + 0] = clamp255(colour[i * 4 + 0]);
+    img.data[i * 4 + 1] = clamp255(colour[i * 4 + 1]);
+    img.data[i * 4 + 2] = clamp255(colour[i * 4 + 2]);
     img.data[i * 4 + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
 }
 
-/** networkOutput: NHWC Float32Array, (OUT_H_PAD, GT_W, 3) -- cropped
- * top-left to (GT_H, GT_W), matching training/src/dataset.py's
- * crop_to_size (top-left crop undoes the bottom-only reflect pad). */
+/** networkOutput: NHWC Float32Array, already cropped to (GT_H, GT_W, 3) --
+ * matches training/src/dataset.py's crop_to_size (top-left crop undoes the
+ * bottom-only reflect pad). Shared by both data sources. */
 function drawNetworkOutput(networkOutput: Float32Array) {
   const img = ctx.createImageData(GT_W, GT_H);
   for (let y = 0; y < GT_H; y++) {
@@ -159,6 +181,14 @@ function clamp255(v: number): number {
   return s < 0 ? 0 : s > 255 ? 255 : s;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function modeLabelFor(mode: DisplayMode): string {
+  return mode === "input" ? "540p input" : mode === "groundtruth" ? "ground truth 1080p (live, not supersampled)" : "network 1080p";
+}
+
 async function main() {
   if (!("gpu" in navigator)) {
     throw new Error("navigator.gpu is undefined — WebGPU not available in this browser/context.");
@@ -168,21 +198,125 @@ async function main() {
   const manifest: Manifest = await (await fetch("/demo_frames/manifest.json")).json();
 
   setStatus("acquiring GPU + loading network weights…");
-  const { device, hasShaderF16, adapter } = await acquireGpu();
+  const { device, hasShaderF16, adapter, maxWorkgroupStorageSize } = await acquireGpu();
   const info = adapter.info;
-  const unet = new WgslUNet(device, hasShaderF16);
+  const unet = new WgslUNet(device, hasShaderF16, false, maxWorkgroupStorageSize);
   await unet.loadWeights("/weights/manifest.json", "/weights/weights.bin");
 
   const frameCache = new Map<number, FrameData>();
   const networkCache = new Map<number, Float32Array>(); // computed once per frame, toggling is free after that
 
   let currentFrame = manifest.frames[0];
-  let currentMode: Mode = "input";
+  let currentMode: DisplayMode = "input";
+  let realtimeActive = false;
+  let livePaused = false;
+  let pipeline: LiveScenePipeline | null = null; // lazily built on first realtime use -- not every visit needs the live-scene machinery
 
-  function setButtonsEnabled(enabled: boolean) {
-    for (const btn of [...frameButtonsEl.children, ...modeButtonsEl.children]) {
-      (btn as HTMLButtonElement).disabled = !enabled;
+  /** Shared by runRealtimeLoop (the running case) and the mode-button
+   * handler's paused case (via pipeline.redisplay()) -- same draw-dispatch
+   * logic either way, just a different source for `result`. */
+  function drawLiveResult(mode: DisplayMode, result: LiveFrameResult) {
+    for (const btn of modeButtonsEl.children as unknown as HTMLButtonElement[]) {
+      btn.classList.toggle("active", btn.dataset.mode === currentMode);
     }
+    if (mode === "input" && result.inputColour) {
+      drawInput(result.inputColour);
+    } else if (mode === "groundtruth" && result.groundTruthColour) {
+      drawGroundTruth(result.groundTruthColour);
+    } else {
+      drawNetworkOutput(result.networkOutput);
+    }
+  }
+
+  function setFrameButtonsEnabled(enabled: boolean) {
+    for (const btn of frameButtonsEl.children) (btn as HTMLButtonElement).disabled = !enabled;
+  }
+  function setButtonsEnabled(enabled: boolean) {
+    setFrameButtonsEnabled(enabled);
+    for (const btn of modeButtonsEl.children) (btn as HTMLButtonElement).disabled = !enabled;
+  }
+
+  /** Runs one forward pass and returns the cropped (GT_H, GT_W, 3) output
+   * plus elapsed ms. `useCache` reuses/populates networkCache for the
+   * static-frame click-to-view path only. */
+  async function computeNetwork(frame: FrameData, frameIdx: number, useCache: boolean): Promise<{ out: Float32Array; ms: number }> {
+    if (useCache) {
+      const cached = networkCache.get(frameIdx);
+      if (cached) return { out: cached, ms: 0 };
+    }
+    const inputData = buildNetworkInput(frame);
+    const t0 = performance.now();
+    const inputFm = unet.allocInput(IN_W, IN_H_PAD, IN_CHANNELS, inputData);
+    const encoder = device.createCommandEncoder();
+    const unetResult = unet.forward(encoder, inputFm);
+    const { output } = unetResult;
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    const full = await unet.readFeatureMap(output); // (OUT_H_PAD, GT_W, 3)
+    const t1 = performance.now();
+    // Nothing downstream holds a GPU reference once readFeatureMap has
+    // copied the output into `full` -- safe to release every buffer this
+    // forward() pass allocated, including output.buffer and the per-call
+    // input buffer.
+    WgslUNet.releaseIntermediates(unetResult);
+    inputFm.buffer.destroy();
+    const out = full.subarray(0, GT_H * GT_W * 3); // top-left crop: OUT_H_PAD rows -> GT_H rows, width already matches
+    if (useCache) networkCache.set(frameIdx, out);
+    return { out, ms: t1 - t0 };
+  }
+
+  /** Drives LiveScenePipeline continuously until realtimeActive is cleared.
+   * While livePaused, idles without calling stepFrame() at all -- the
+   * camera path genuinely stops advancing, not just "draws the same thing
+   * repeatedly." Mode switches while paused go through the mode-button
+   * handler's separate pipeline.redisplay() path instead of this loop, for
+   * instant response rather than waiting on a poll interval.
+   *
+   * When *not* paused, reads `currentMode` fresh each iteration -- a
+   * mode-button click while a step is in flight takes effect on the *next*
+   * iteration, since that step's request (and therefore which of
+   * inputColour/groundTruthColour it computed) was already committed when
+   * it started; this can show one stale-mode frame in the rare case a click
+   * lands mid-step, self-corrects next iteration, not worth extra
+   * synchronisation for a one-frame cosmetic gap in a continuously-running
+   * loop. */
+  async function runRealtimeLoop() {
+    let disocclusionLogAccum = 0;
+    let disocclusionLogCount = 0;
+
+    while (realtimeActive) {
+      if (livePaused) {
+        await sleep(100);
+        continue;
+      }
+
+      const requestedMode = currentMode;
+      const result = await pipeline!.stepFrame(requestedMode);
+      if (!realtimeActive) break; // stopped while this pass was in flight
+
+      drawLiveResult(requestedMode, result);
+
+      if (result.meanDisocclusion !== null) {
+        disocclusionLogAccum += result.meanDisocclusion;
+        disocclusionLogCount++;
+        if (disocclusionLogCount % 30 === 0) {
+          console.log(`[realtime] mean disocclusion fraction over last 30 frames: ${(disocclusionLogAccum / 30).toFixed(4)}`);
+          disocclusionLogAccum = 0;
+        }
+      }
+
+      setStatus(`realtime — live scene, frame ${result.frameIndex}, t=${result.t.toFixed(2)}s, view: ${modeLabelFor(requestedMode)}`);
+      // Pause may have been clicked while this step was in flight -- prefer
+      // that over showing a real fps number that's about to be stale, so
+      // the readout is consistent regardless of exactly when the click landed.
+      if (livePaused) {
+        setFps("paused", true);
+      } else {
+        const fps = 1000 / result.ms;
+        setFps(`${result.ms.toFixed(1)}ms/frame · ${fps.toFixed(1)}fps`, false);
+      }
+    }
+    setFps("", true);
   }
 
   function highlightActive() {
@@ -200,33 +334,25 @@ async function main() {
 
     if (currentMode === "input") {
       setStatus(`frame ${currentFrame} — raw 540p input (nearest-upscaled 2x for display)`);
-      drawInput(frame);
+      drawInput(frame.color);
       return;
     }
 
     if (currentMode === "groundtruth") {
       setStatus(`frame ${currentFrame} — captured 1080p ground truth`);
-      drawGroundTruth(frame);
+      drawGroundTruth(frame.gt);
       return;
     }
 
     // network mode
-    let out = networkCache.get(currentFrame);
-    if (!out) {
+    const wasCached = networkCache.has(currentFrame);
+    if (!wasCached) {
       setButtonsEnabled(false);
-      setStatus(`frame ${currentFrame} — running WGSL network (~3.3s at this resolution, see docs/PHASE-4-SUMMARY.md)…`);
-      const inputData = buildNetworkInput(frame);
-      const t0 = performance.now();
-      const inputFm = unet.allocInput(IN_W, IN_H_PAD, IN_CHANNELS, inputData);
-      const encoder = device.createCommandEncoder();
-      const { output } = unet.forward(encoder, inputFm);
-      device.queue.submit([encoder.finish()]);
-      await device.queue.onSubmittedWorkDone();
-      const full = await unet.readFeatureMap(output); // (OUT_H_PAD, GT_W, 3)
-      const t1 = performance.now();
-      out = full.subarray(0, GT_H * GT_W * 3); // top-left crop: OUT_H_PAD rows -> GT_H rows, width already matches
-      networkCache.set(currentFrame, out);
-      setStatus(`frame ${currentFrame} — WGSL network output (computed in ${((t1 - t0) / 1000).toFixed(2)}s, cached)`);
+      setStatus(`frame ${currentFrame} — running WGSL network (~0.10s at this resolution, see docs/OPTIMISATIONS.md)…`);
+    }
+    const { out, ms } = await computeNetwork(frame, currentFrame, true);
+    if (!wasCached) {
+      setStatus(`frame ${currentFrame} — WGSL network output (computed in ${ms.toFixed(1)}ms, cached)`);
       setButtonsEnabled(true);
     } else {
       setStatus(`frame ${currentFrame} — WGSL network output (cached)`);
@@ -239,6 +365,7 @@ async function main() {
     btn.textContent = String(idx);
     btn.dataset.frame = String(idx);
     btn.addEventListener("click", async () => {
+      if (realtimeActive) return; // frame buttons don't apply during live playback
       currentFrame = idx;
       if (!frameCache.has(idx)) {
         setButtonsEnabled(false);
@@ -251,7 +378,7 @@ async function main() {
     frameButtonsEl.appendChild(btn);
   }
 
-  const modes: { mode: Mode; label: string }[] = [
+  const modes: { mode: DisplayMode; label: string }[] = [
     { mode: "input", label: "540p input" },
     { mode: "network", label: "network 1080p" },
     { mode: "groundtruth", label: "ground truth 1080p" },
@@ -262,10 +389,72 @@ async function main() {
     btn.dataset.mode = mode;
     btn.addEventListener("click", async () => {
       currentMode = mode;
+      if (realtimeActive && livePaused) {
+        // Paused: redisplay the *same* frozen frame in the new mode right
+        // away, via pipeline.redisplay() -- instant, no waiting on
+        // runRealtimeLoop's poll interval, and the camera path doesn't move.
+        const result = await pipeline!.redisplay(mode);
+        drawLiveResult(mode, result);
+        setStatus(`realtime — paused, frame ${result.frameIndex}, t=${result.t.toFixed(2)}s, view: ${modeLabelFor(mode)}`);
+        return;
+      }
+      if (realtimeActive) {
+        // Running: just update state -- runRealtimeLoop picks it up next
+        // iteration (see that function's docstring); don't stop/restart it.
+        for (const b of modeButtonsEl.children as unknown as HTMLButtonElement[]) {
+          b.classList.toggle("active", b.dataset.mode === currentMode);
+        }
+        return;
+      }
       await render();
     });
     modeButtonsEl.appendChild(btn);
   }
+
+  function setPaused(paused: boolean) {
+    livePaused = paused;
+    pauseToggleEl.textContent = paused ? "▶ resume" : "⏸ pause";
+    pauseToggleEl.classList.toggle("active", paused);
+  }
+
+  realtimeToggleEl.addEventListener("click", async () => {
+    if (realtimeActive) {
+      // Stop: runRealtimeLoop() notices on its next loop check (or the
+      // in-flight-pass check right after it) and exits on its own; nothing
+      // here needs to await it finishing.
+      realtimeActive = false;
+      realtimeToggleEl.textContent = "▶ realtime";
+      realtimeToggleEl.classList.remove("active");
+      setPaused(false);
+      pauseToggleEl.disabled = true;
+      setFrameButtonsEnabled(true);
+      await render(); // redraw whatever the frame/mode buttons currently point at, not a stale realtime frame
+      return;
+    }
+
+    realtimeToggleEl.textContent = "■ stop";
+    realtimeToggleEl.classList.add("active");
+    // Frame buttons don't apply to the live scene -- disable just those;
+    // mode buttons must stay clickable so the view can switch live.
+    setFrameButtonsEnabled(false);
+    for (const btn of frameButtonsEl.children as unknown as HTMLButtonElement[]) {
+      btn.classList.remove("active"); // no static frame corresponds to the live scene
+    }
+
+    if (!pipeline) {
+      setStatus("realtime — building live-scene pipeline (first use only)…");
+      pipeline = await LiveScenePipeline.create(device, unet, hasShaderF16);
+    }
+    realtimeActive = true;
+    pauseToggleEl.disabled = false;
+    runRealtimeLoop(); // intentionally not awaited -- runs in the background until the toggle flips realtimeActive back off
+  });
+
+  pauseToggleEl.addEventListener("click", () => {
+    if (!realtimeActive) return; // shouldn't be reachable (disabled otherwise), guarded anyway
+    setPaused(!livePaused);
+    if (livePaused) setFps("paused", true);
+  });
 
   setStatus(`loading frame ${currentFrame}…`);
   frameCache.set(currentFrame, await loadFrame(currentFrame));

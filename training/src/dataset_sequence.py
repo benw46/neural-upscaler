@@ -42,11 +42,18 @@ class SequenceDataset(Dataset):
         return len(self.valid_starts)
 
     def _load_frame(self, frame_idx: int):
+        # memmap, not fromfile -- see MEMORY.md's dataloader-memmap-io-fix
+        # note. Only the rows touched by __getitem__'s crop below get paged
+        # in from disk, instead of all 4 full channels being read per frame
+        # just to harvest one shared small patch across the sequence window
+        # (this was the ~223GB/epoch source for Phase 3). The .astype calls
+        # in __getitem__ already force a real copy at the point each patch
+        # is sliced out, so correctness is unaffected.
         fname = f"{frame_idx:06d}.bin"
-        color = np.fromfile(self.run_dir / "color" / fname, dtype=np.float16).reshape(self.input_h, self.input_w, 4)
-        depth = np.fromfile(self.run_dir / "depth" / fname, dtype=np.float32).reshape(self.input_h, self.input_w, 1)
-        motion = np.fromfile(self.run_dir / "motion" / fname, dtype=np.float16).reshape(self.input_h, self.input_w, 2)
-        gt = np.fromfile(self.run_dir / "gt_color" / fname, dtype=np.float16).reshape(self.gt_h, self.gt_w, 4)
+        color = np.memmap(self.run_dir / "color" / fname, dtype=np.float16, mode="r", shape=(self.input_h, self.input_w, 4))
+        depth = np.memmap(self.run_dir / "depth" / fname, dtype=np.float32, mode="r", shape=(self.input_h, self.input_w, 1))
+        motion = np.memmap(self.run_dir / "motion" / fname, dtype=np.float16, mode="r", shape=(self.input_h, self.input_w, 2))
+        gt = np.memmap(self.run_dir / "gt_color" / fname, dtype=np.float16, mode="r", shape=(self.gt_h, self.gt_w, 4))
         return color, depth, motion, gt
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:

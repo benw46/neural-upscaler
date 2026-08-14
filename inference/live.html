@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Neural Upscaler — Viewer</title>
+    <title>Neural Upscaler — Live</title>
     <style>
       html, body {
         margin: 0;
@@ -47,24 +47,13 @@
         background: #333;
       }
       button.active {
-        background: #2a5;
-        border-color: #2a5;
-        color: #041;
-        font-weight: bold;
-      }
-      button:disabled {
-        opacity: 0.4;
-        cursor: default;
-      }
-      #realtimeToggle.active {
         background: #a52a2a;
         border-color: #d33;
         color: #fff;
       }
-      #pauseToggle.active {
-        background: #a5822a;
-        border-color: #d3a333;
-        color: #fff;
+      button:disabled {
+        opacity: 0.4;
+        cursor: default;
       }
       #status {
         color: #999;
@@ -95,17 +84,8 @@
     <div id="app">
       <div id="controls">
         <div class="group">
-          <span>frame</span>
-          <div id="frameButtons"></div>
-        </div>
-        <div class="group">
-          <span>view</span>
-          <div id="modeButtons"></div>
-        </div>
-        <div class="group">
-          <span>live</span>
-          <button id="realtimeToggle">▶ realtime</button>
-          <button id="pauseToggle" disabled>⏸ pause</button>
+          <span>scene</span>
+          <button id="liveToggle">▶ start live</button>
         </div>
       </div>
       <div id="status">initialising…</div>
@@ -114,6 +94,6 @@
         <canvas id="canvas" width="1920" height="1080"></canvas>
       </div>
     </div>
-    <script type="module" src="/src/viewer.ts"></script>
+    <script type="module" src="/src/live.ts"></script>
   </body>
 </html>

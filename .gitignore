@@ -16,6 +16,7 @@ __pycache__/
 /training/runs/
 /training/runs_temporal/
 /training/long_sequence_results/
+/training/long_sequence_results_*/
 /training/*.txt
 
 # ONNX exports and diff fixtures — regenerable from training/src via export/

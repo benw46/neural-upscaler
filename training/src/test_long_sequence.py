@@ -9,6 +9,7 @@ not the 128x128 training patches -- full frames are what the gate cares
 about and avoid patch-boundary edge effects patches would introduce.
 """
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -24,9 +25,20 @@ from model import SpatialUNet  # noqa: E402
 from warp import compute_disocclusion_mask, upsample_motion, warp_previous_output  # noqa: E402
 
 RUN_DIR = Path(r"E:\neural-upscaler\data\seed-20260812")
-CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "checkpoints_temporal" / "temporal_w1.0_final_best.pt"
-OUT_DIR = Path(__file__).resolve().parent.parent / "long_sequence_results"
+DEFAULT_CHECKPOINT = Path(__file__).resolve().parent.parent / "checkpoints_temporal" / "temporal_w1.0_final_best.pt"
+DEFAULT_OUT_DIR = Path(__file__).resolve().parent.parent / "long_sequence_results"
 SEQUENCE_LENGTH = 350  # gate requires 300+; some margin
+
+
+def parse_args() -> argparse.Namespace:
+    """CLI overrides so re-running this gate against a new checkpoint (e.g.
+    a colour-loss sweep candidate, see measure_color_sweep.py) can't
+    silently overwrite the deployed model's own gate results -- defaults
+    reproduce the original invocation exactly."""
+    p = argparse.ArgumentParser()
+    p.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    p.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    return p.parse_args()
 
 
 def load_frame(frame_idx: int, input_w: int, input_h: int, gt_w: int, gt_h: int):
@@ -53,6 +65,10 @@ def luminance(t: torch.Tensor) -> float:
 
 
 def main():
+    args = parse_args()
+    checkpoint_path = args.checkpoint
+    out_dir = args.out_dir
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}")
 
@@ -67,12 +83,12 @@ def main():
     print(f"rolling out frames {frame_range.start}..{frame_range.stop - 1} ({SEQUENCE_LENGTH} frames)")
 
     model = SpatialUNet(in_channels=8).to(device)
-    model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=device))
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.eval()
-    print(f"loaded checkpoint: {CHECKPOINT_PATH}")
+    print(f"loaded checkpoint: {checkpoint_path}")
 
-    OUT_DIR.mkdir(exist_ok=True)
-    sample_frames_dir = OUT_DIR / "sample_frames"
+    out_dir.mkdir(exist_ok=True)
+    sample_frames_dir = out_dir / "sample_frames"
     sample_frames_dir.mkdir(exist_ok=True)
 
     prev_output_highres = None
@@ -159,7 +175,7 @@ def main():
             prev_output_highres = pred_padded.clamp(0, 1)  # keep feeding padded resolution forward, consistent with training
             prev_depth = depth_padded
 
-    (OUT_DIR / "records.json").write_text(json.dumps(records, indent=2))
+    (out_dir / "records.json").write_text(json.dumps(records, indent=2))
 
     # --- summary ---
     brightness = [r["brightness"] for r in records]
@@ -196,7 +212,7 @@ def main():
     print(f"mean l1(pred, warped_prev)={mean_pred_vs_warped:.5f}  mean l1(warped_prev, gt)={mean_warped_vs_gt:.5f}  mean l1(pred, gt)={mean_pred_vs_gt:.5f}")
     print("(degenerate copying would show l1(pred,gt) close to l1(warped_prev,gt) and l1(pred,warped_prev) near zero)")
 
-    print(f"\nsample frames + full records written to {OUT_DIR}")
+    print(f"\nsample frames + full records written to {out_dir}")
 
 
 if __name__ == "__main__":

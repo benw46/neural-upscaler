@@ -16,7 +16,7 @@ from model import SpatialUNet  # noqa: E402
 PATCH_SIZE = 128
 IN_CHANNELS = 8
 SEED = 123
-CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "training" / "checkpoints_temporal" / "temporal_w1.0_final_best.pt"
+CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "training" / "checkpoints_temporal" / "temporal_w1.0_lpips02_best.pt"
 OUT_DIR = Path(__file__).resolve().parent
 
 

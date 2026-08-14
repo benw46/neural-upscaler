@@ -1,6 +1,7 @@
 import * as ort from "onnxruntime-web/webgpu";
 import { acquireGpu } from "./gpu.ts";
-import { WgslUNet } from "./model_wgsl.ts";
+import { WgslUNet, scalarPrelude, toScalarBytes } from "./model_wgsl.ts";
+import warpSource from "./wgsl/warp_and_disocclude.wgsl?raw";
 
 const statusEl = document.querySelector<HTMLDivElement>("#status")!;
 function log(line: string) {
@@ -70,19 +71,20 @@ const LAYER_CHECKS = [
 async function runWgslCheck() {
   log("--- Step 2: hand-written WGSL vs PyTorch, per layer (Spec 4 step 6) ---");
   const inputData = await fetchFloat32("/test_input_temporal_nhwc.bin");
-  const { device, hasShaderF16, adapter } = await acquireGpu();
+  const { device, hasShaderF16, adapter, maxWorkgroupStorageSize } = await acquireGpu();
   const info = adapter.info;
   log(`adapter: ${info?.vendor ?? "?"} / ${info?.device ?? "?"} / ${info?.description ?? "?"}`);
   log(`shader-f16: ${hasShaderF16}`);
+  log(`maxComputeWorkgroupStorageSize: ${maxWorkgroupStorageSize} bytes`);
 
-  const unet = new WgslUNet(device, hasShaderF16);
+  const unet = new WgslUNet(device, hasShaderF16, false, maxWorkgroupStorageSize);
   await unet.loadWeights("/weights/manifest.json", "/weights/weights.bin");
 
   const inputFm = unet.allocInput(PATCH_SIZE, PATCH_SIZE, IN_CHANNELS, inputData);
 
   const encoder = device.createCommandEncoder();
   const t0 = performance.now();
-  const { output, intermediates } = unet.forward(encoder, inputFm);
+  const { output, intermediates, allBuffers } = unet.forward(encoder, inputFm);
   device.queue.submit([encoder.finish()]);
   await device.queue.onSubmittedWorkDone();
   const t1 = performance.now();
@@ -110,6 +112,12 @@ async function runWgslCheck() {
   log(`\nfinal output vs PyTorch: max=${finalMax.toFixed(6)} mean=${finalMean.toFixed(6)}`);
 
   log(`\n${allPassed && finalMax < FP16_TOLERANCE ? "PASSED" : "FAILED"}: all layers within FP16 tolerance (${FP16_TOLERANCE})`);
+
+  // Every intermediate has now been read back into a CPU-side Float32Array
+  // (readFeatureMap above, per layer) -- safe to release every GPU buffer
+  // this forward() pass allocated, plus the per-call input buffer.
+  WgslUNet.releaseIntermediates({ allBuffers });
+  inputFm.buffer.destroy();
 }
 
 // Real deployment resolution per CLAUDE.md hard rule 1 (540p -> 1080p), not
@@ -134,9 +142,13 @@ async function profileAtResolution(unet: WgslUNet, device: GPUDevice, width: num
     log(`  size ${width}x${height}: warmup ${i + 1}/${warmupRuns}…`);
     const inputFm = unet.allocInput(width, height, IN_CHANNELS, dummyInput);
     const encoder = device.createCommandEncoder();
-    unet.forward(encoder, inputFm);
+    const unetResult = unet.forward(encoder, inputFm);
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
+    // Throwaway pass -- nothing reads the output, release everything this
+    // call allocated (including the per-run input buffer) immediately.
+    WgslUNet.releaseIntermediates(unetResult);
+    inputFm.buffer.destroy();
   }
 
   const perDispatchTotals = new Map<string, number[]>();
@@ -146,9 +158,11 @@ async function profileAtResolution(unet: WgslUNet, device: GPUDevice, width: num
     log(`  size ${width}x${height}: timed run ${i + 1}/${timedRuns}…`);
     const inputFm = unet.allocInput(width, height, IN_CHANNELS, dummyInput);
     const encoder = device.createCommandEncoder();
-    unet.forward(encoder, inputFm, { profile: true });
+    const unetResult = unet.forward(encoder, inputFm, { profile: true });
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
+    WgslUNet.releaseIntermediates(unetResult);
+    inputFm.buffer.destroy();
 
     const profile = await unet.resolveProfile();
     let runTotal = 0;
@@ -173,13 +187,14 @@ async function profileAtResolution(unet: WgslUNet, device: GPUDevice, width: num
 
 async function runProfiling() {
   log("\n--- Step 3: GPU timestamp-query profiling at deployment resolution (Spec 4 step 7) ---");
-  const { device, hasShaderF16, hasTimestampQuery } = await acquireGpu();
+  const { device, hasShaderF16, hasTimestampQuery, maxWorkgroupStorageSize } = await acquireGpu();
   if (!hasTimestampQuery) {
     log("timestamp-query not available on this adapter — skipping GPU profiling.");
     return;
   }
+  log(`maxComputeWorkgroupStorageSize: ${maxWorkgroupStorageSize} bytes`);
 
-  const unet = new WgslUNet(device, hasShaderF16, hasTimestampQuery);
+  const unet = new WgslUNet(device, hasShaderF16, hasTimestampQuery, maxWorkgroupStorageSize);
   await unet.loadWeights("/weights/manifest.json", "/weights/weights.bin");
 
   // Ramp up in size, with per-iteration progress logging -- an earlier
@@ -203,6 +218,148 @@ async function runProfiling() {
   log("Not expected to match PSSR (a shipped, heavily-optimised production kernel) -- reporting the honest number and gap, per CLAUDE.md.");
 }
 
+// Not part of the original Spec 4 sequence -- closes a gap flagged after the
+// fact: warp_and_disocclude.wgsl (live_pipeline.ts's reimplementation of
+// training/src/warp.py's warp_previous_output + compute_disocclusion_mask)
+// was derived and eyeballed for plausibility but never diffed numerically
+// against the PyTorch reference the way every other kernel here has been.
+// Fixture generated by export/gen_diff_fixtures_warp.py: H=68,W=96
+// deliberately unequal so an x/y transposition bug wouldn't pass by luck on
+// a square grid, motion large enough that a real fraction of pixels fall
+// off-screen (exercises "zeros" colour padding + the offscreen disocclusion
+// branch), prev_depth partly perturbed with forced large jumps (exercises
+// the depth-mismatch branch), not just the near-zero-motion interior case.
+const WARP_H = 68;
+const WARP_W = 96;
+
+function makeUniformU32(device: GPUDevice, values: number[]): GPUBuffer {
+  const buf = device.createBuffer({ size: values.length * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(buf, 0, new Uint32Array(values));
+  return buf;
+}
+
+async function runWarpCheck(): Promise<void> {
+  log("--- Step 4: warp_and_disocclude.wgsl vs PyTorch (training/src/warp.py) -- closing the previously-flagged validation gap ---");
+  const prevLowres = await fetchFloat32("/warp_prev_lowres.bin"); // (H,W,3)
+  const motion = await fetchFloat32("/warp_motion.bin"); // (H,W,2)
+  const currDepth = await fetchFloat32("/warp_curr_depth.bin"); // (H,W)
+  const prevDepth = await fetchFloat32("/warp_prev_depth.bin"); // (H,W)
+  const pytorchOutput = await fetchFloat32("/pytorch_output_warp.bin"); // (H,W,4) = [warped rgb, mask]
+
+  const { device, hasShaderF16 } = await acquireGpu();
+  const prelude = scalarPrelude(hasShaderF16);
+  const bytesPerElement = hasShaderF16 ? 2 : 4;
+
+  const layout = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float" } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float" } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float" } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+    ],
+  });
+  const pipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+    compute: { module: device.createShaderModule({ code: prelude + warpSource }), entryPoint: "main" },
+  });
+
+  const prevLowresBuf = device.createBuffer({ size: WARP_H * WARP_W * 3 * bytesPerElement, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(prevLowresBuf, 0, toScalarBytes(prevLowres, hasShaderF16));
+
+  const motionTex = device.createTexture({ size: [WARP_W, WARP_H], format: "rg16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  device.queue.writeTexture({ texture: motionTex }, new Float16Array(motion).buffer, { bytesPerRow: WARP_W * 4 }, [WARP_W, WARP_H]);
+
+  const currDepthTex = device.createTexture({ size: [WARP_W, WARP_H], format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  device.queue.writeTexture({ texture: currDepthTex }, currDepth.buffer, { bytesPerRow: WARP_W * 4 }, [WARP_W, WARP_H]);
+
+  const prevDepthTex = device.createTexture({ size: [WARP_W, WARP_H], format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  device.queue.writeTexture({ texture: prevDepthTex }, prevDepth.buffer, { bytesPerRow: WARP_W * 4 }, [WARP_W, WARP_H]);
+
+  const outBuf = device.createBuffer({ size: WARP_H * WARP_W * 4 * bytesPerElement, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const uniform = makeUniformU32(device, [WARP_W, WARP_H, 0]); // is_first_frame=0 -- exercise the real math, not the cold-start branch
+
+  const bindGroup = device.createBindGroup({
+    layout,
+    entries: [
+      { binding: 0, resource: { buffer: uniform } },
+      { binding: 1, resource: { buffer: prevLowresBuf } },
+      { binding: 2, resource: motionTex.createView() },
+      { binding: 3, resource: currDepthTex.createView() },
+      { binding: 4, resource: prevDepthTex.createView() },
+      { binding: 5, resource: { buffer: outBuf } },
+    ],
+  });
+
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.dispatchWorkgroups(Math.ceil(WARP_W / 8), Math.ceil(WARP_H / 8), 1);
+  pass.end();
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+
+  const readback = device.createBuffer({ size: outBuf.size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const readEncoder = device.createCommandEncoder();
+  readEncoder.copyBufferToBuffer(outBuf, 0, readback, 0, outBuf.size);
+  device.queue.submit([readEncoder.finish()]);
+  await readback.mapAsync(GPUMapMode.READ);
+  const wgslOutput = hasShaderF16
+    ? Float32Array.from(new Float16Array(readback.getMappedRange().slice(0)))
+    : new Float32Array(readback.getMappedRange().slice(0));
+  readback.unmap();
+
+  // The mask channel (index 3 of every 4) is a hard {0,1} threshold
+  // decision, not a continuous value -- a near-miss there (a bilinear depth
+  // sample landing a hair either side of DEPTH_REL_THRESHOLD) is a
+  // different failure mode than FP16 rounding noise in the colour channels,
+  // so it's compared separately rather than folded into the same max/mean
+  // as the colour channels. Previously this used the shared compare()
+  // helper over the *whole* flat array (colour + mask together), which made
+  // `max` always ~1.0 whenever even one mask pixel landed on a boundary tie
+  // (an expected, documented outcome -- see MASK_MISMATCH_TOLERANCE below),
+  // permanently failing the max<FP16_TOLERANCE gate regardless of how
+  // accurate the colour channels actually were. Computing colour-channel
+  // max/mean directly here (excluding index 3 of every 4) fixes that: the
+  // gate now reflects what it's meant to -- colour accuracy and mask
+  // agreement, judged by their own, separately-justified tolerances.
+  //
+  // MASK_MISMATCH_TOLERANCE: independently re-deriving the mismatched
+  // pixels on this fixture (H=68,W=96, seed=7) found all of them sit inside
+  // a rel_diff band within 0.002 of DEPTH_REL_THRESHOLD=0.05 -- i.e. cases
+  // where PyTorch's grid_sample and WGSL's hand-written bilinear agree to
+  // ~1e-4 (same order as the colour channels' FP16 rounding) but that tiny
+  // disagreement happens to land on opposite sides of a hard threshold.
+  // That's an inherent property of comparing two independently-rounded
+  // floating point pipelines against a boolean cutoff, not a UV-convention
+  // or logic bug -- so a small fraction of boundary flips is accepted
+  // rather than gated at zero. 0.5% is a deliberately generous margin
+  // against the observed 0.12% (8/6528) on this fixture; a real bug (wrong
+  // sign, wrong padding mode, swapped axes) would produce gross,
+  // widespread disagreement, not an isolated few-pixel boundary effect.
+  const MASK_MISMATCH_TOLERANCE = 0.005;
+  let colourMax = 0;
+  let colourSum = 0;
+  let maskMismatches = 0;
+  const maskTotal = wgslOutput.length / 4;
+  for (let i = 0; i < wgslOutput.length; i += 4) {
+    for (let c = 0; c < 3; c++) {
+      const err = Math.abs(wgslOutput[i + c] - pytorchOutput[i + c]);
+      if (err > colourMax) colourMax = err;
+      colourSum += err;
+    }
+    if (Math.abs(wgslOutput[i + 3] - pytorchOutput[i + 3]) > 0.5) maskMismatches++;
+  }
+  const colourMean = colourSum / (maskTotal * 3);
+  const maskMismatchFraction = maskMismatches / maskTotal;
+
+  log(`warp+disocclusion vs PyTorch (colour channels only): max abs error=${colourMax.toFixed(6)} mean=${colourMean.toFixed(6)}`);
+  log(`disocclusion mask mismatches: ${maskMismatches}/${maskTotal} pixels (${(maskMismatchFraction * 100).toFixed(3)}%, tolerance ${(MASK_MISMATCH_TOLERANCE * 100).toFixed(1)}%) -- expected to be boundary threshold ties, see comment above`);
+  log(`${colourMax < FP16_TOLERANCE && maskMismatchFraction <= MASK_MISMATCH_TOLERANCE ? "PASSED" : "FAILED"}: warp kernel matches PyTorch within FP16 tolerance; mask decisions agree within the documented threshold-boundary tolerance\n`);
+}
+
 async function main() {
   if (!("gpu" in navigator)) {
     throw new Error("navigator.gpu is undefined — WebGPU not available in this browser/context.");
@@ -211,6 +368,7 @@ async function main() {
   await runOrtWebCheck();
   await runWgslCheck();
   await runProfiling();
+  await runWarpCheck();
 }
 
 main().catch((err) => {

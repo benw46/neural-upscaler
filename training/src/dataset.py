@@ -28,12 +28,23 @@ DEPTH_NORM = 50.0
 
 
 class SpatialPatchDataset(Dataset):
-    """Random-crop training dataset -- a fresh random patch location each
-    call, like standard crop augmentation. For deterministic/reproducible
-    evaluation (baseline comparison, gate metrics), use `FullFrameDataset`
-    instead, not this class with a fixed index."""
+    """One dataset item = one frame, opened once, yielding `patches_per_frame`
+    independent random crops from it as a stacked tensor -- not one item per
+    crop. Deliberately restructured this way (see MEMORY.md's
+    dataloader-redundant-reads-fix note): calling __getitem__ once per crop,
+    as this class used to, meant a frame's file got reopened
+    `patches_per_frame` separate times per epoch, scattered across the
+    shuffled epoch order where no reasonably-sized cache could catch the
+    reuse. Opening once and drawing all the crops from that single open
+    cuts file-opens by `patches_per_frame`x. The cost of doing this naively
+    (all of a frame's crops landing in the same training batch, hurting
+    per-batch content diversity) is deliberately NOT absorbed here -- see
+    train.py's pool-shuffle, which restores diversity by pooling several
+    frames' worth of crops and shuffling before slicing into training
+    batches. This class's job is only to make one open yield many crops;
+    it does not decide how those crops get batched."""
 
-    def __init__(self, run_dir: str, frame_indices: list[int], patch_size: int = 128):
+    def __init__(self, run_dir: str, frame_indices: list[int], patch_size: int = 128, patches_per_frame: int = 1):
         self.run_dir = Path(run_dir)
         header = json.loads((self.run_dir / "dataset.json").read_text())
         self.input_w = header["inputWidth"]
@@ -42,6 +53,7 @@ class SpatialPatchDataset(Dataset):
         self.gt_h = header["gtHeight"]
         self.frame_indices = list(frame_indices)
         self.patch_size = patch_size
+        self.patches_per_frame = patches_per_frame
 
     def __len__(self) -> int:
         return len(self.frame_indices)
@@ -50,25 +62,37 @@ class SpatialPatchDataset(Dataset):
         frame_idx = self.frame_indices[idx]
         fname = f"{frame_idx:06d}.bin"
 
-        color = np.fromfile(self.run_dir / "color" / fname, dtype=np.float16).reshape(self.input_h, self.input_w, 4)
-        depth = np.fromfile(self.run_dir / "depth" / fname, dtype=np.float32).reshape(self.input_h, self.input_w, 1)
-        gt = np.fromfile(self.run_dir / "gt_color" / fname, dtype=np.float16).reshape(self.gt_h, self.gt_w, 4)
+        # memmap, not fromfile: only the pages touched by the crops below
+        # get paged in from disk, instead of the whole frame being read just
+        # to harvest a handful of small patches out of it (see MEMORY.md's
+        # dataloader-memmap-io-fix note -- this was the ~310GB/epoch source
+        # for Phase 2). Correctness is unaffected: the .astype(np.float32)
+        # calls below already force a real owned-array copy at the point
+        # each patch is sliced out, so nothing downstream ever sees or holds
+        # onto the memmap itself.
+        color = np.memmap(self.run_dir / "color" / fname, dtype=np.float16, mode="r", shape=(self.input_h, self.input_w, 4))
+        depth = np.memmap(self.run_dir / "depth" / fname, dtype=np.float32, mode="r", shape=(self.input_h, self.input_w, 1))
+        gt = np.memmap(self.run_dir / "gt_color" / fname, dtype=np.float16, mode="r", shape=(self.gt_h, self.gt_w, 4))
 
         max_x = self.input_w - self.patch_size
         max_y = self.input_h - self.patch_size
-        x = int(np.random.randint(0, max_x + 1))
-        y = int(np.random.randint(0, max_y + 1))
         ps = self.patch_size
 
-        color_patch = color[y : y + ps, x : x + ps, :3].astype(np.float32)
-        depth_patch = depth[y : y + ps, x : x + ps, :].astype(np.float32) / DEPTH_NORM
-        input_patch = np.concatenate([color_patch, depth_patch], axis=-1)  # (ps, ps, 4)
+        input_patches = []
+        gt_patches = []
+        for _ in range(self.patches_per_frame):
+            x = int(np.random.randint(0, max_x + 1))
+            y = int(np.random.randint(0, max_y + 1))
 
-        gt_x, gt_y, gt_ps = x * 2, y * 2, ps * 2
-        gt_patch = gt[gt_y : gt_y + gt_ps, gt_x : gt_x + gt_ps, :3].astype(np.float32)
+            color_patch = color[y : y + ps, x : x + ps, :3].astype(np.float32)
+            depth_patch = depth[y : y + ps, x : x + ps, :].astype(np.float32) / DEPTH_NORM
+            input_patches.append(np.concatenate([color_patch, depth_patch], axis=-1))  # (ps, ps, 4)
 
-        input_tensor = torch.from_numpy(input_patch).permute(2, 0, 1).contiguous()
-        target_tensor = torch.from_numpy(gt_patch).permute(2, 0, 1).contiguous()
+            gt_x, gt_y, gt_ps = x * 2, y * 2, ps * 2
+            gt_patches.append(gt[gt_y : gt_y + gt_ps, gt_x : gt_x + gt_ps, :3].astype(np.float32))
+
+        input_tensor = torch.from_numpy(np.stack(input_patches)).permute(0, 3, 1, 2).contiguous()  # (patches_per_frame, 4, ps, ps)
+        target_tensor = torch.from_numpy(np.stack(gt_patches)).permute(0, 3, 1, 2).contiguous()  # (patches_per_frame, 3, ps*2, ps*2)
         return input_tensor, target_tensor
 
 
@@ -83,9 +107,9 @@ def load_fixed_patch(run_dir: str, frame_idx: int, x: int, y: int, patch_size: i
     gt_w, gt_h = header["gtWidth"], header["gtHeight"]
     fname = f"{frame_idx:06d}.bin"
 
-    color = np.fromfile(run_dir / "color" / fname, dtype=np.float16).reshape(input_h, input_w, 4)
-    depth = np.fromfile(run_dir / "depth" / fname, dtype=np.float32).reshape(input_h, input_w, 1)
-    gt = np.fromfile(run_dir / "gt_color" / fname, dtype=np.float16).reshape(gt_h, gt_w, 4)
+    color = np.memmap(run_dir / "color" / fname, dtype=np.float16, mode="r", shape=(input_h, input_w, 4))
+    depth = np.memmap(run_dir / "depth" / fname, dtype=np.float32, mode="r", shape=(input_h, input_w, 1))
+    gt = np.memmap(run_dir / "gt_color" / fname, dtype=np.float16, mode="r", shape=(gt_h, gt_w, 4))
 
     ps = patch_size
     color_patch = color[y : y + ps, x : x + ps, :3].astype(np.float32)

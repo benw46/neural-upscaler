@@ -13,13 +13,16 @@ export default defineConfig({
     exclude: ["onnxruntime-web"],
   },
   build: {
-    // Two independent pages: index.html (the Spec 4 correctness/profiling
-    // harness) and viewer.html (the 540p-vs-network-1080p demo). Vite only
-    // builds index.html by default; both need listing explicitly here.
+    // Three independent pages: index.html (the Spec 4 correctness/profiling
+    // harness), viewer.html (the 540p-vs-network-1080p demo on 4 static
+    // frames), and live.html (the live renderer + real-time upscaling +
+    // real temporal warping demo, importing renderer/ code directly). Vite
+    // only builds index.html by default; all three need listing explicitly.
     rollupOptions: {
       input: {
         main: resolve(rootDir, "index.html"),
         viewer: resolve(rootDir, "viewer.html"),
+        live: resolve(rootDir, "live.html"),
       },
     },
   },

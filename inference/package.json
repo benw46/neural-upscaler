@@ -14,6 +14,7 @@
     "vite": "^8.2.0"
   },
   "dependencies": {
+    "gl-matrix": "^3.4.4",
     "onnxruntime-web": "^1.27.0"
   },
   "allowScripts": {

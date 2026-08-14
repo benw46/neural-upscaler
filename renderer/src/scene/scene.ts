@@ -95,6 +95,37 @@ export function buildScene(): Scene {
     colliders.push({ center: [ax, az], radius: Math.hypot(s / 2, s / 2), minY: 0, maxY: s });
   }
 
+  // One fixed, hand-placed accent cube (not drawn from `rng`, so it doesn't
+  // perturb the 10 seeded ones above or anything drawn after them) sitting
+  // directly in the scripted camera path's early view. With only 10 small
+  // (0.4-1.0 unit) accent cubes scattered across the full 60-unit ground
+  // plane, the live viewer's realtime mode could run for a long time before
+  // the orbit happened to swing past one -- confirmed directly by computing
+  // ScriptedCameraPath(SEED)'s actual eye/target at t=0 (renderer/src/camera/path.ts):
+  // eye=(40.41, 3.00, 0.20), looking in direction (-0.993, -0.016, -0.117),
+  // an 8.5-degree offset from this cube's placement below (comfortably
+  // inside the ~60x91-degree vertical/horizontal FOV, not dead-centre so it
+  // doesn't sit exactly behind anything on the camera's own forward axis).
+  //
+  // Placed at (20, 0) rather than directly on that ray on purpose: the
+  // building grid (gridN=6, cellSize=10) has cell centres at x,z in
+  // {-25,-15,-5,5,15,25}, each building only 4-7 units wide -- (20, 0) sits
+  // exactly at the gap corner between the x=15/x=25 columns and z=-5/z=5
+  // rows, >=7 units from every neighbouring cell centre, clear of every
+  // building regardless of that cell's randomly-drawn width/rotation. A
+  // first attempt placed directly along the t=0 view ray (~20 units out)
+  // turned out to sit almost exactly on the x=25 column and was occluded --
+  // corrected empirically after checking the live render, not just the ray
+  // math alone. Sized larger (1.4) than the random ones (max 1.0) so it
+  // reads clearly at this distance, not as a speck.
+  {
+    const s = 1.4;
+    const ax = 20, az = 0;
+    const box = makeBox(s, s, s, 1);
+    accentMeshes.push(transformMesh(box, [ax, s / 2, az], 0));
+    colliders.push({ center: [ax, az], radius: Math.hypot(s / 2, s / 2), minY: 0, maxY: s });
+  }
+
   const groups: SceneGroup[] = [
     { name: "ground", mesh: ground, textureData: noiseTexture(128, SEED), textureSize: 128 },
     { name: "buildings", mesh: mergeMeshes(buildingMeshes), textureData: checkerTexture(64), textureSize: 64 },
