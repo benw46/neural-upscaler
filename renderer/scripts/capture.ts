@@ -48,6 +48,7 @@ interface CliArgs {
   run: string;
   width: number;
   height: number;
+  colored: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -67,6 +68,7 @@ function parseArgs(argv: string[]): CliArgs {
     run: raw.run ?? `seed-${seed}`,
     width: raw.width ? Number(raw.width) : 960,
     height: raw.height ? Number(raw.height) : 540,
+    colored: raw.colored === "true",
   };
 }
 
@@ -139,7 +141,7 @@ async function main() {
   const mainShaderSource = await fs.readFile(path.join(SRC_DIR, "render", "shaders.wgsl"), "utf8");
   const downsampleShaderSource = await fs.readFile(path.join(SRC_DIR, "render", "downsample.wgsl"), "utf8");
 
-  const renderer = new SceneRenderer(device, mainShaderSource);
+  const renderer = new SceneRenderer(device, mainShaderSource, args.colored);
   const inputGBuffer = new GBuffer(device, args.width, args.height);
   const superGBuffer = new GBuffer(device, superWidth, superHeight);
   const gtColorTexture = device.createTexture({
@@ -171,6 +173,7 @@ async function main() {
       gt_color: { format: "rgba16float", width: gtWidth, height: gtHeight },
     },
     createdAt: new Date().toISOString(),
+    colored: args.colored,
   };
   await fs.writeFile(path.join(runDir, "dataset.json"), JSON.stringify(header, null, 2));
 

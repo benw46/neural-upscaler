@@ -4,8 +4,7 @@ spatial checkpoints (checkpoints/*.pt), never against checkpoints_temporal/,
 even though the whole reason the deployed temporal model uses
 lpips_weight=0.2 instead of the original 0.1 was to address this same
 diagnosed colour issue (see docs/PHASE-3-SUMMARY.md, notebook/). That
-premise was never actually checked on the model it was meant to fix -- this
-does.
+premise was never actually checked on the model it was meant to fix.
 
 Unlike the spatial version's 10 single-frame cold-start predictions, this
 runs a genuine recurrent rollout (same mechanics as test_long_sequence.py:
@@ -13,6 +12,18 @@ no ground-truth teacher-forcing, no BPTT, real warped-previous-output
 feedback) over the full held-out calm window, and bins chroma/luma error
 across every frame in that rollout -- a much larger, and more
 deployment-realistic, sample than the spatial script's approach.
+
+Round 2 (2026-08-14): evaluates all four temporal checkpoints -- the three
+originally trained on the grayscale scene, plus the new colour_tw0.75
+(trained on the seed-20260812-colored dataset) -- against the SAME
+held-out COLOURED frames, not each on its own training distribution. That
+isolates the actual question: does training on colour reduce desaturation,
+evaluated on real colour content, rather than each model's own (possibly
+easier or harder) held-out split. The original seed-20260812 (grayscale)
+dataset this script first ran against has since been deleted (its job was
+done -- the three grayscale-trained checkpoints already exist and don't
+need the source data to run inference); re-pointed at the colour dataset
+for this round.
 
 Not part of the training pipeline -- a throwaway analysis script, not
 imported anywhere.
@@ -31,7 +42,7 @@ from dataset import DEPTH_NORM, crop_to_size, pad_to_multiple, train_val_split  
 from model import SpatialUNet  # noqa: E402
 from warp import compute_disocclusion_mask, warp_previous_output  # noqa: E402
 
-RUN_DIR = Path(r"E:\neural-upscaler\data\seed-20260812")
+RUN_DIR = Path(r"E:\neural-upscaler\data\seed-20260812-colored")
 CHECKPOINT_DIR = Path(__file__).resolve().parent.parent / "checkpoints_temporal"
 SEQUENCE_LENGTH = 350  # same calm held-out window test_long_sequence.py's default gate uses
 BINS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
@@ -163,9 +174,15 @@ def main():
         # accidentally overwritten by an unrelated smoke test earlier this
         # session -- colorbaseline_tw1.0_lpips01 is a freshly-retrained
         # equivalent (same recipe: tw=1.0, lpips=0.1) standing in for it.
-        "colorbaseline (tw=1.0, lpips=0.1)": CHECKPOINT_DIR / "colorbaseline_tw1.0_lpips01_best.pt",
-        "temporal_w1.0_lpips02 (tw=1.0, lpips=0.2)": CHECKPOINT_DIR / "temporal_w1.0_lpips02_best.pt",
-        "sweep_tw0.75 (DEPLOYED, tw=0.75, lpips=0.2)": CHECKPOINT_DIR / "sweep_tw0.75_best.pt",
+        # All three below were trained on the grayscale scene -- this run
+        # evaluates them out-of-distribution, on real colour content, which
+        # is exactly the comparison that matters here.
+        "colorbaseline (grayscale-trained, tw=1.0, lpips=0.1)": CHECKPOINT_DIR / "colorbaseline_tw1.0_lpips01_best.pt",
+        "temporal_w1.0_lpips02 (grayscale-trained, tw=1.0, lpips=0.2)": CHECKPOINT_DIR / "temporal_w1.0_lpips02_best.pt",
+        "sweep_tw0.75 (grayscale-trained, DEPLOYED, tw=0.75, lpips=0.2)": CHECKPOINT_DIR / "sweep_tw0.75_best.pt",
+        "colour_tw0.75 (COLOUR-trained, tw=0.75, lpips=0.2)": CHECKPOINT_DIR / "colour_tw0.75_best.pt",
+        "colour_tw0.75_sat0.5 (COLOUR-trained, tw=0.75, lpips=0.2, sat=0.5)": CHECKPOINT_DIR / "colour_tw0.75_sat0.5_best.pt",
+        "colour_tw0.75_sat1.0 (COLOUR-trained, tw=0.75, lpips=0.2, sat=1.0)": CHECKPOINT_DIR / "colour_tw0.75_sat1.0_best.pt",
     }
 
     results = {}

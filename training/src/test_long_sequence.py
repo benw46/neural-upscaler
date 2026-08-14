@@ -39,11 +39,15 @@ def parse_args() -> argparse.Namespace:
     run against a *different* window -- e.g. a stress test against a heavy
     disocclusion event found in the training range (not held-out, so not a
     generalisation test, but real signal on failure-mode behaviour that the
-    calm held-out block never exercises)."""
+    calm held-out block never exercises). `--run-dir` (default None -> the
+    hardcoded RUN_DIR above, the original behaviour) points the gate at a
+    different captured dataset entirely -- e.g. the coloured-scene run,
+    needed once the original grayscale RUN_DIR was deleted."""
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     p.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     p.add_argument("--start-frame", type=int, default=None)
+    p.add_argument("--run-dir", type=Path, default=None)
     return p.parse_args()
 
 
@@ -71,9 +75,12 @@ def luminance(t: torch.Tensor) -> float:
 
 
 def main():
+    global RUN_DIR
     args = parse_args()
     checkpoint_path = args.checkpoint
     out_dir = args.out_dir
+    if args.run_dir is not None:
+        RUN_DIR = args.run_dir
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}")

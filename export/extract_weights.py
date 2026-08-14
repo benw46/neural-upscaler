@@ -50,18 +50,20 @@ LAYERS = [
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    p.add_argument("--out-dir", type=Path, default=OUT_DIR)
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    out_dir = args.out_dir
     model = SpatialUNet(in_channels=8)
     model.load_state_dict(torch.load(args.checkpoint, map_location="cpu"))
     model.eval()
     state = model.state_dict()
     print(f"loaded checkpoint: {args.checkpoint}")
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     blob_parts = []
     offset = 0
     manifest = {"layers": []}
@@ -98,11 +100,11 @@ def main():
         offset += len(weight_bytes) + len(bias_bytes)
 
     blob = b"".join(blob_parts)
-    (OUT_DIR / "weights.bin").write_bytes(blob)
-    (OUT_DIR / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    (out_dir / "weights.bin").write_bytes(blob)
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
-    print(f"wrote {len(blob):,} bytes across {len(LAYERS)} layers to {OUT_DIR / 'weights.bin'}")
-    print(f"manifest: {OUT_DIR / 'manifest.json'}")
+    print(f"wrote {len(blob):,} bytes across {len(LAYERS)} layers to {out_dir / 'weights.bin'}")
+    print(f"manifest: {out_dir / 'manifest.json'}")
     for layer in manifest["layers"]:
         print(f"  {layer['name']:20s} in={layer['inChannels']:4d} out={layer['outChannels']:4d} stride={layer['stride']} act={layer['activation']}")
 

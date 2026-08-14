@@ -24,8 +24,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def chroma(img: torch.Tensor) -> torch.Tensor:
+    """max(R,G,B) - min(R,G,B) per pixel -- the same chroma definition
+    measure_color_sweep_temporal.py's diagnostic uses, so a `sat_weight`
+    loss term built on this directly targets the exact quantity that
+    diagnostic measures as "desaturation". `img`: (B, 3, H, W) in [0, 1].
+    amax/amin over dim=1 (channels); both are subdifferentiable (gradient
+    flows to whichever channel is currently the max/min), which is all
+    that's needed here -- no smooth approximation necessary."""
+    return img.amax(dim=1) - img.amin(dim=1)
+
+
 class CombinedLoss(nn.Module):
-    def __init__(self, l1_weight: float = 1.0, lpips_weight: float = 0.1, lpips_net: str = "vgg", lpips_scale: float = 1.0):
+    def __init__(self, l1_weight: float = 1.0, lpips_weight: float = 0.1, lpips_net: str = "vgg", lpips_scale: float = 1.0, sat_weight: float = 0.0):
         """`lpips_scale`: downsamples pred/target by this factor before
         computing LPIPS specifically -- L1 always stays at full resolution.
         1.0 = no downsampling (the original behaviour). LPIPS's VGG16
@@ -40,7 +51,16 @@ class CombinedLoss(nn.Module):
         sharp detail -- see this class's module docstring), not a free win
         like mixed-precision training was -- validate finished-model
         quality (sharpness, not just speed) before trusting a value other
-        than 1.0 for real training, don't assume the timing win is free."""
+        than 1.0 for real training, don't assume the timing win is free.
+
+        `sat_weight`: weight on an L1 loss between predicted and
+        ground-truth chroma (see `chroma()` above). 0.0 = off (the original
+        behaviour -- L1/LPIPS already implicitly penalise colour error, this
+        is an additional explicit push specifically on saturation, motivated
+        by the round-2 colour-desaturation diagnostic in
+        docs/OPTIMISATIONS.md finding a persistent chroma gap even in the
+        colour-trained model). Empirical, like lpips_scale -- validate
+        against the same diagnostic before trusting a nonzero value."""
         super().__init__()
         self.l1 = nn.L1Loss()
         self.lpips = lpips.LPIPS(net=lpips_net)
@@ -49,6 +69,7 @@ class CombinedLoss(nn.Module):
         self.l1_weight = l1_weight
         self.lpips_weight = lpips_weight
         self.lpips_scale = lpips_scale
+        self.sat_weight = sat_weight
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
         l1_val = self.l1(pred, target)
@@ -61,7 +82,13 @@ class CombinedLoss(nn.Module):
             pred_lp, target_lp = pred, target
         lpips_val = self.lpips(pred_lp * 2 - 1, target_lp * 2 - 1).mean()
         total = self.l1_weight * l1_val + self.lpips_weight * lpips_val
-        return total, {"l1": l1_val.item(), "lpips": lpips_val.item(), "total": total.item()}
+        parts = {"l1": l1_val.item(), "lpips": lpips_val.item()}
+        if self.sat_weight != 0.0:
+            sat_val = (chroma(pred) - chroma(target)).abs().mean()
+            total = total + self.sat_weight * sat_val
+            parts["sat"] = sat_val.item()
+        parts["total"] = total.item()
+        return total, parts
 
 
 def temporal_consistency_loss(pred: torch.Tensor, warped_prev: torch.Tensor, disocclusion_mask: torch.Tensor) -> torch.Tensor:

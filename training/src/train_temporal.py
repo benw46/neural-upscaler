@@ -67,13 +67,17 @@ def parse_args() -> argparse.Namespace:
     sweep is explicitly being re-run finer now that training is ~6x faster
     (see MEMORY.md), so it's exposed here too. Always pass --run-label
     explicitly alongside a non-default --temporal-weight, so a sweep run
-    can't collide with (and overwrite) any existing checkpoint family."""
+    can't collide with (and overwrite) any existing checkpoint family.
+    `--run-dir` points at a different captured dataset entirely (e.g. the
+    coloured-scene run) -- same recipe, different training data."""
     p = argparse.ArgumentParser()
     p.add_argument("--lpips-weight", type=float, default=0.1)
     p.add_argument("--lpips-scale", type=float, default=1.0)
+    p.add_argument("--sat-weight", type=float, default=0.0)
     p.add_argument("--run-label", type=str, default=RUN_LABEL)
     p.add_argument("--temporal-weight", type=float, default=TEMPORAL_WEIGHT)
     p.add_argument("--seed", type=int, default=SEED)
+    p.add_argument("--run-dir", type=str, default=RUN_DIR)
     return p.parse_args()
 
 
@@ -158,6 +162,7 @@ def unroll_sequence(model, batch, loss_fn, device, temporal_weight: float):
             {
                 "l1": spatial_parts["l1"],
                 "lpips": spatial_parts["lpips"],
+                "sat": spatial_parts.get("sat", 0.0),  # 0.0 when sat_weight=0.0 (the loss term is off, not just unweighted)
                 "temporal": temporal_loss.item(),
                 "disocclusion_frac": disocclusion_mask.mean().item(),
             }
@@ -183,7 +188,7 @@ def unroll_sequence(model, batch, loss_fn, device, temporal_weight: float):
 @torch.no_grad()
 def validate(model, val_ds: SequenceDataset, loss_fn, device: str, n_sequences: int = 20) -> dict:
     model.eval()
-    totals = {"l1": 0.0, "lpips": 0.0, "temporal": 0.0}
+    totals = {"l1": 0.0, "lpips": 0.0, "sat": 0.0, "temporal": 0.0}
     n = min(n_sequences, len(val_ds))
     loader = DataLoader(val_ds, batch_size=1, shuffle=False)
     for i, batch in enumerate(loader):
@@ -220,16 +225,16 @@ def main():
 
     seed_everything(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"device: {device}  run: {run_label}  temporal_weight: {TEMPORAL_WEIGHT}  lpips_weight: {args.lpips_weight}")
+    print(f"device: {device}  run: {run_label}  temporal_weight: {TEMPORAL_WEIGHT}  lpips_weight: {args.lpips_weight}  sat_weight: {args.sat_weight}  run_dir: {args.run_dir}")
 
-    train_idx, val_idx = train_val_split(RUN_DIR, val_fraction=VAL_FRACTION)
+    train_idx, val_idx = train_val_split(args.run_dir, val_fraction=VAL_FRACTION)
     print(f"train frames: {len(train_idx)}  val frames: {len(val_idx)}")
 
-    val_ds = SequenceDataset(RUN_DIR, val_idx, seq_len=SEQ_LEN, patch_size=PATCH_SIZE)
+    val_ds = SequenceDataset(args.run_dir, val_idx, seq_len=SEQ_LEN, patch_size=PATCH_SIZE)
     print(f"val sequences: {len(val_ds)}")
 
     model = SpatialUNet(in_channels=8).to(device)
-    loss_fn = CombinedLoss(l1_weight=1.0, lpips_weight=args.lpips_weight, lpips_scale=args.lpips_scale).to(device)
+    loss_fn = CombinedLoss(l1_weight=1.0, lpips_weight=args.lpips_weight, lpips_scale=args.lpips_scale, sat_weight=args.sat_weight).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
@@ -245,7 +250,7 @@ def main():
     t0 = time.time()
     for epoch in range(EPOCHS):
         model.train()
-        epoch_totals = {"l1": 0.0, "lpips": 0.0, "temporal": 0.0}
+        epoch_totals = {"l1": 0.0, "lpips": 0.0, "sat": 0.0, "temporal": 0.0}
         # Fresh dataset + loader every epoch, offset by `epoch` -- see
         # SequenceDataset's docstring. Cuts the ~6x sliding-window read
         # redundancy down to ~1x within an epoch by using non-overlapping
@@ -254,7 +259,7 @@ def main():
         # 0..SEQ_LEN-1. Not persistent_workers -- a new loader (and new
         # workers) every epoch is exactly what varying the offset needs;
         # the one-off spawn cost per epoch is small next to the I/O saved.
-        train_ds = SequenceDataset(RUN_DIR, train_idx, seq_len=SEQ_LEN, patch_size=PATCH_SIZE, epoch=epoch)
+        train_ds = SequenceDataset(args.run_dir, train_idx, seq_len=SEQ_LEN, patch_size=PATCH_SIZE, epoch=epoch)
         train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
         pbar = tqdm(train_loader, desc=f"epoch {epoch + 1}/{EPOCHS} ({len(train_ds)} sequences)")
         for batch in pbar:
@@ -264,13 +269,14 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP_NORM)
             optimizer.step()
 
-            avg = {k: sum(r[k] for r in step_records) / len(step_records) for k in ("l1", "lpips", "temporal")}
+            avg = {k: sum(r[k] for r in step_records) / len(step_records) for k in ("l1", "lpips", "sat", "temporal")}
             for k in epoch_totals:
                 epoch_totals[k] += avg[k]
             pbar.set_postfix(l1=f"{avg['l1']:.4f}", temporal=f"{avg['temporal']:.4f}")
 
             writer.add_scalar("train/l1_batch", avg["l1"], global_step)
             writer.add_scalar("train/lpips_batch", avg["lpips"], global_step)
+            writer.add_scalar("train/sat_batch", avg["sat"], global_step)
             writer.add_scalar("train/temporal_batch", avg["temporal"], global_step)
             global_step += 1
 

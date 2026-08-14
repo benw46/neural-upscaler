@@ -21,6 +21,14 @@ export interface DatasetHeader {
     gt_color: { format: "rgba16float"; width: number; height: number };
   };
   createdAt: string;
+  /** Whether this run used buildScene()'s coloured-texture variant (see
+   * renderer/src/scene/scene.ts) instead of the original grayscale one.
+   * Same geometry/camera path either way -- this only distinguishes texture
+   * appearance, but it's the whole reason a second dataset run exists, so
+   * it's recorded rather than left to be inferred from the run's directory
+   * name. Optional so older dataset.json files (predating this field)
+   * still parse. */
+  colored?: boolean;
 }
 
 export interface ManifestRecord {
