@@ -450,3 +450,162 @@ optimisation work from here, not 104.5ms.
 | `inference/src/model_wgsl.ts` | Pipeline specialisation/caching, per-layer dispatch routing |
 | `inference/src/main.ts` | The correctness + profiling harness every stage above was checked against |
 | `docs/PHASE-4-SUMMARY.md` | The original gate this work continues from (baseline numbers) |
+
+**Note (2026-08-14):** the deployed checkpoint changed after this section
+was written (see "Training Pipeline Optimisations" below —
+`temporal_weight=0.75` replaced the original model). Re-verified the full
+harness against the new weights: correctness still passes (errors in the
+same range), and profiling read **102.31ms/frame** — consistent with the
+96–102ms range already measured, since kernel dispatch time doesn't depend
+on weight *values*, only the (unchanged) architecture. Not a regression.
+
+---
+
+# Training Pipeline Optimisations
+
+Separate from the WGSL inference work above — this covers training-side
+speed and model-quality work done in the same follow-on period. Two
+independent speed fixes landed, both measured on this machine; a finer
+temporal-weight sweep (made affordable *by* those speed fixes) found and
+canonicalized a better deployed model; one further speed idea (LPIPS at
+reduced resolution) was tested and honestly rejected rather than adopted
+on a promising microbenchmark alone.
+
+## Mixed precision (bf16 autocast)
+
+`torch.autocast(device_type="cuda", dtype=torch.bfloat16)` added to both
+`training/src/train.py` and `training/src/train_temporal.py`. **bf16
+chosen over classic fp16+GradScaler deliberately**: this architecture has
+no normalisation layers and both training scripts have documented
+instability history (`train.py`'s own docstring: L1-only loss diverged
+from 0.055 to 15,158 without gradient clipping; `train_temporal.py`'s
+recurrent feedback path needed an explicit clamp fix after an
+"exponential-blowup cascade"). bf16 has fp32's full exponent range, so it
+can't overflow-to-inf the way fp16 can on a blow-up, and needs no loss
+scaler — real safety margin given this model's specific history, not a
+default habit.
+
+Scoped tightly in `train_temporal.py`: autocast wraps only the model
+forward + loss inside `unroll_sequence()`'s per-timestep loop, not the
+surrounding warp/disocclusion/feedback logic — `pred` is cast back to
+`.float()` immediately after, before it touches the already-debugged
+recurrent numerics, so nothing about that path's behaviour changed.
+
+**Measured** (1-epoch timing comparisons, both directions tested):
+
+| script | without AMP | with AMP | speedup |
+|---|---:|---:|---:|
+| `train.py` (spatial) | 368.4s | 288.0s | 1.28x |
+| `train_temporal.py` (temporal) | 220.3s | 179.7s | 1.23x |
+
+Both directions stayed numerically sane (no NaN, no divergence, normal
+loss magnitudes).
+
+## Phase 3 dataloader fix (~6x redundant reads)
+
+`SequenceDataset` (`training/src/dataset_sequence.py`) originally used
+every possible overlapping `seq_len`-frame window as a valid sequence
+start (stride=1). With `shuffle=True`, an epoch drawing from all of them
+touches each source frame up to `seq_len` (6) times — measured ~6x
+redundant reads, the dominant remaining I/O cost after the earlier memmap
+fix.
+
+**Fix**: `SequenceDataset` now takes an `epoch` param restricting a given
+epoch to non-overlapping (stride=`seq_len`) starts, offset by
+`epoch % seq_len`. `train_temporal.py` builds a fresh dataset + `DataLoader`
+(not `persistent_workers` — needed since the offset must vary and Windows'
+spawned workers can't see mutations to an already-forked dataset) at the
+top of each epoch, passing the real epoch number.
+
+**Verified correctness before trusting the speed number**: the union of
+sequence starts across one full 6-epoch offset cycle exactly matches the
+original 1495 stride-1 starts — every possible window is still covered,
+just spread across epochs instead of crammed into each one. Redundancy
+within a single epoch measured **1.00x** exactly (down from ~6x).
+
+**Measured**: ~220s/epoch (baseline) → ~44s/epoch (dataloader fix alone,
+AMP off) → ~36s/epoch (combined with AMP) — **~6.1x combined**, matching
+the predicted I/O reduction almost exactly.
+
+## Finer temporal-weight sweep → canonicalized `temporal_weight=0.75`
+
+Phase 3's original sweep (`notebook/PHASE-3-EXPERIMENTS.md`) was coarse by
+its own admission: 4 points (0.0/0.5/1.0/4.0), 4 epochs each. With both
+speed fixes above landed, a full 20-epoch run dropped from ~73min to
+~12min, making a proper finer sweep affordable.
+
+Swept `{0.75, 1.0, 1.25, 1.5, 2.0}` at full 20 epochs, `lpips_weight=0.2`
+(matching the deployed recipe), comparing **last-5-validation-checkpoint
+averages, not single-best** — single-checkpoint numbers were found (in a
+separate investigation into an unrelated old-vs-clamped-model puzzle) to
+swing 30–40% from noise alone.
+
+`temporal_weight=0.75` won on val_l1 by a consistent ~27–29% margin,
+**confirmed across two seeds**, with no meaningful cost to val_temporal
+(seed-to-seed differences there were ~4%, inside the noise band).
+
+**Confirmed on the metric that actually matters, not just training-time
+val_l1** — the real 350-frame long-sequence gate, plus a new disocclusion
+stress test (below):
+
+| | calm held-out window (real gate) | disocclusion stress window |
+|---|---:|---:|
+| deployed before (lpips02, tw=1.0) | mean L1 0.03534 | mean L1 0.04638, grows +0.0158 over the sequence |
+| **tw=0.75 (new deployed)** | **mean L1 0.03306 (−6.5%)** | **mean L1 0.03855 (−17%), grows only +0.0085** |
+
+One honest caveat: ghosting-at-disocclusions was slightly *worse* for
+tw=0.75 in both windows (~3–7% higher) — small enough relative to the
+30–40% noise floor to likely not be a real effect, but not zero either.
+
+**Canonicalized** the same way the earlier lpips02 candidate was:
+`sweep_tw0.75_best.pt` is now the checkpoint referenced by
+`extract_weights.py`, `gen_diff_fixtures_temporal.py`,
+`capture_intermediates.py`, and `test_long_sequence.py`'s defaults. Full
+4-step WGSL correctness+profiling harness re-verified passing after
+rebuilding (see the note at the end of the WGSL section above).
+
+**New reusable tooling from this**: `--temporal-weight`/`--seed` on
+`train_temporal.py` (previously hardcoded constants); `--start-frame` on
+`test_long_sequence.py`, letting the existing gate machinery target any
+window, not just the held-out one (prints a warning when it isn't a fair
+generalisation test). The held-out validation block (frames 1500–1999)
+turns out to have almost no disocclusion pressure anywhere (max fraction
+1.6%) — a real, structural gap in this dataset; the best available stress
+window sits in the training range at frames 318–667 (a genuine held-out
+disocclusion test would need new captured data, not done here).
+
+## LPIPS at reduced resolution (tested, rejected)
+
+LPIPS's VGG16 backbone was measured at **~89% of a full training step**,
+even under bf16 autocast (231ms of a 260ms step) — it dominates training
+time regardless of everything else done to speed it up. `CombinedLoss`
+gained an `lpips_scale` param (default `1.0`, unchanged) that downsamples
+pred/target before computing LPIPS specifically; L1 always stays full
+resolution.
+
+An isolated microbenchmark at `lpips_scale=0.5` showed a 2.8x full-step
+speedup — but the **real end-to-end training run** only sped up **1.38x**
+(719.8s → 520.8s): LPIPS dominates in isolation, but isn't the *only* cost
+in the real loop (dataloading, warp/disocclusion compute, and the 6x BPTT
+unroll per batch all cost the same regardless). Quality was consistently
+worse across three independent metrics — training val_l1 (~13% worse),
+the real long-sequence gate (~5.8% worse), ghosting (~3.9% worse) — none
+individually past the established noise floor, but three metrics agreeing
+in the same direction is itself a real signal. A visual sample-frame
+comparison showed no obviously visible blur, just a small consistent
+numeric regression.
+
+**Verdict: not adopted.** 1.38x doesn't clear the bar the AMP + dataloader
+fixes already cleared (~6x combined) given the real quality cost. The
+capability is kept (`--lpips-scale` on both training scripts, opt-in, off
+by default) — a validated negative result, not a mistake to undo.
+
+## Colour desaturation check on the deployed (temporal) model
+
+*In progress — `measure_color_sweep.py` was written to diagnose an
+L1-driven colour desaturation/highlight-darkening issue, but only ever
+ran against the Phase 2 spatial checkpoints, never the temporal model the
+higher `lpips_weight=0.2` was actually meant to fix. A temporal-model
+counterpart (`measure_color_sweep_temporal.py`, real recurrent rollout
+over the held-out calm window, same chroma/luma-binned-gap methodology)
+is being run now; this section will be updated with the result.*
