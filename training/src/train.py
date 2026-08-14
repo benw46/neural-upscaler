@@ -17,6 +17,7 @@ data is written, no need to wait for the run to finish.
 """
 
 import argparse
+import contextlib
 import datetime
 import sys
 import time
@@ -91,6 +92,18 @@ def seed_everything(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
+def amp_autocast(device: str):
+    """bf16 autocast on CUDA, no-op on CPU. bf16 over classic fp16+GradScaler
+    deliberately: this architecture has no normalisation layers and is
+    documented (see module docstring) to have diverged to a loss of 15,158
+    without gradient clipping -- bf16 has fp32's exponent range, so it can't
+    overflow-to-inf the way fp16 can on a blow-up, and needs no loss scaler
+    at all. Ampere (RTX 3060) supports bf16 tensor cores natively."""
+    if device == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return contextlib.nullcontext()
+
+
 @torch.no_grad()
 def validate(model: torch.nn.Module, val_ds: FullFrameDataset, device: str) -> float:
     model.eval()
@@ -100,8 +113,9 @@ def validate(model: torch.nn.Module, val_ds: FullFrameDataset, device: str) -> f
         x = x.unsqueeze(0).to(device)
         y = y.unsqueeze(0).to(device)
         x_padded, orig_size = pad_to_multiple(x)
-        pred = model(x_padded)
-        pred = crop_to_size(pred, (orig_size[0] * 2, orig_size[1] * 2))
+        with amp_autocast(device):
+            pred = model(x_padded)
+        pred = crop_to_size(pred.float(), (orig_size[0] * 2, orig_size[1] * 2))
         total_l1 += torch.nn.functional.l1_loss(pred, y).item()
     model.train()
     return total_l1 / len(val_ds)
@@ -118,8 +132,9 @@ def log_sample_images(writer: SummaryWriter, model: torch.nn.Module, val_ds: Ful
         x = x.unsqueeze(0).to(device)
         y = y.unsqueeze(0).to(device)
         x_padded, orig_size = pad_to_multiple(x)
-        pred = model(x_padded)
-        pred = crop_to_size(pred, (orig_size[0] * 2, orig_size[1] * 2)).clamp(0, 1)
+        with amp_autocast(device):
+            pred = model(x_padded)
+        pred = crop_to_size(pred.float(), (orig_size[0] * 2, orig_size[1] * 2)).clamp(0, 1)
 
         input_upsampled = torch.nn.functional.interpolate(x[:, :3], scale_factor=2, mode="nearest")
         grid = vutils.make_grid(torch.cat([input_upsampled, pred, y], dim=0), nrow=3)
@@ -192,8 +207,9 @@ def main():
                 y = pool_y[i : i + BATCH_SIZE].to(device, non_blocking=True)
 
                 optimizer.zero_grad()
-                pred = model(x)
-                loss, parts = loss_fn(pred, y)
+                with amp_autocast(device):
+                    pred = model(x)
+                    loss, parts = loss_fn(pred, y)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP_NORM)
                 optimizer.step()

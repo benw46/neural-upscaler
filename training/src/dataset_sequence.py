@@ -18,7 +18,22 @@ from dataset import DEPTH_NORM
 
 
 class SequenceDataset(Dataset):
-    def __init__(self, run_dir: str, frame_indices: list[int], seq_len: int = 6, patch_size: int = 128):
+    def __init__(self, run_dir: str, frame_indices: list[int], seq_len: int = 6, patch_size: int = 128, epoch: int = 0):
+        """`epoch`: selects which non-overlapping grid of sequence starts
+        this dataset instance covers -- see MEMORY.md's Phase-3-dataloader
+        note. Every possible `seq_len`-consecutive-frame window is a "valid
+        start" in principle (stride=1, the original behaviour), but with
+        `shuffle=True` an epoch that draws from *all* of them touches each
+        source frame up to `seq_len` times (measured ~6x redundant reads --
+        the sliding windows overlap almost completely). Restricting a given
+        epoch's starts to stride=`seq_len`, offset by `epoch % seq_len`,
+        cuts that to ~1x within any one epoch, while still covering every
+        possible window phase over a multi-epoch run as the offset cycles.
+        The training loop is responsible for constructing a fresh dataset
+        (and DataLoader -- not persistent_workers) per epoch, passing the
+        real epoch number, for this to actually vary; a fixed `epoch=0`
+        (the default) still works standalone -- e.g. for validation, or any
+        one-off use -- it just always uses the same (first) grid."""
         self.run_dir = Path(run_dir)
         header = json.loads((self.run_dir / "dataset.json").read_text())
         self.input_w = header["inputWidth"]
@@ -34,9 +49,10 @@ class SequenceDataset(Dataset):
         frame_indices = sorted(frame_indices)
         assert frame_indices == list(range(frame_indices[0], frame_indices[-1] + 1)), "frame_indices must be contiguous"
         self.first, self.last = frame_indices[0], frame_indices[-1]
-        self.valid_starts = list(range(self.first, self.last - seq_len + 2))
+        offset = epoch % seq_len
+        self.valid_starts = list(range(self.first + offset, self.last - seq_len + 2, seq_len))
         if not self.valid_starts:
-            raise ValueError(f"no valid sequence starts: {len(frame_indices)} frames, seq_len={seq_len}")
+            raise ValueError(f"no valid sequence starts: {len(frame_indices)} frames, seq_len={seq_len}, epoch offset={offset}")
 
     def __len__(self) -> int:
         return len(self.valid_starts)

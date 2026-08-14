@@ -13,6 +13,7 @@ consistency... is empirical, not derivable."
 """
 
 import argparse
+import contextlib
 import datetime
 import sys
 import time
@@ -75,6 +76,22 @@ def seed_everything(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
+def amp_autocast(device: str):
+    """bf16 autocast on CUDA, no-op on CPU. bf16 over classic fp16+GradScaler
+    deliberately: this architecture has no normalisation layers, and the
+    recurrent feedback path specifically has documented history of an
+    exponential-blowup cascade (see the `prev_output_highres` clamp comment
+    below) -- bf16 has fp32's exponent range, so it can't overflow-to-inf
+    the way fp16 can on a blow-up, and needs no loss scaler. Ampere (RTX
+    3060) supports bf16 tensor cores natively. Scoped tightly in
+    unroll_sequence() to just the model forward + loss (see there) --
+    everything else in the recurrence (warp, disocclusion, the clamp) stays
+    fp32, unchanged from before this was added."""
+    if device == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return contextlib.nullcontext()
+
+
 def unroll_sequence(model, batch, loss_fn, device, temporal_weight: float):
     """Runs one full recurrent unroll over a (B, seq_len, ...) batch,
     returns the total loss (summed over steps, still attached to the graph
@@ -111,9 +128,18 @@ def unroll_sequence(model, batch, loss_fn, device, temporal_weight: float):
             warped_prev_highres = warp_previous_output(prev_output_highres, motion_highres)
 
         model_input = torch.cat([curr_color, curr_depth, warped_prev_lowres, disocclusion_mask], dim=1)
-        pred = model(model_input)
-
-        spatial_loss, spatial_parts = loss_fn(pred, curr_gt)
+        # Autocast scoped to just the model forward + loss -- the heaviest
+        # compute (16 conv layers x this loss's own VGG forward) -- not the
+        # surrounding warp/disocclusion/feedback logic, which stays exactly
+        # fp32 as it always was (see amp_autocast's docstring). `.float()`
+        # immediately after re-establishes fp32 before `pred` is used
+        # anywhere outside the loss, so nothing downstream (the temporal
+        # loss, the clamped feedback into next step's warp) changes numeric
+        # behaviour from before this was added.
+        with amp_autocast(device):
+            pred = model(model_input)
+            spatial_loss, spatial_parts = loss_fn(pred, curr_gt)
+        pred = pred.float()
         if t == 0:
             temporal_loss = torch.zeros((), device=device)
         else:
@@ -191,10 +217,8 @@ def main():
     train_idx, val_idx = train_val_split(RUN_DIR, val_fraction=VAL_FRACTION)
     print(f"train frames: {len(train_idx)}  val frames: {len(val_idx)}")
 
-    train_ds = SequenceDataset(RUN_DIR, train_idx, seq_len=SEQ_LEN, patch_size=PATCH_SIZE)
     val_ds = SequenceDataset(RUN_DIR, val_idx, seq_len=SEQ_LEN, patch_size=PATCH_SIZE)
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, persistent_workers=True, pin_memory=True)
-    print(f"train sequences: {len(train_ds)}  val sequences: {len(val_ds)}  batches/epoch: {len(train_loader)}")
+    print(f"val sequences: {len(val_ds)}")
 
     model = SpatialUNet(in_channels=8).to(device)
     loss_fn = CombinedLoss(l1_weight=1.0, lpips_weight=args.lpips_weight).to(device)
@@ -214,7 +238,17 @@ def main():
     for epoch in range(EPOCHS):
         model.train()
         epoch_totals = {"l1": 0.0, "lpips": 0.0, "temporal": 0.0}
-        pbar = tqdm(train_loader, desc=f"epoch {epoch + 1}/{EPOCHS}")
+        # Fresh dataset + loader every epoch, offset by `epoch` -- see
+        # SequenceDataset's docstring. Cuts the ~6x sliding-window read
+        # redundancy down to ~1x within an epoch by using non-overlapping
+        # (stride=seq_len) windows, while still covering every possible
+        # window phase over the course of the run as the offset cycles
+        # 0..SEQ_LEN-1. Not persistent_workers -- a new loader (and new
+        # workers) every epoch is exactly what varying the offset needs;
+        # the one-off spawn cost per epoch is small next to the I/O saved.
+        train_ds = SequenceDataset(RUN_DIR, train_idx, seq_len=SEQ_LEN, patch_size=PATCH_SIZE, epoch=epoch)
+        train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+        pbar = tqdm(train_loader, desc=f"epoch {epoch + 1}/{EPOCHS} ({len(train_ds)} sequences)")
         for batch in pbar:
             optimizer.zero_grad()
             total_loss, step_records, _ = unroll_sequence(model, batch, loss_fn, device, TEMPORAL_WEIGHT)
